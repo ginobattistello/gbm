@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+title: "GBM Toolbox: Bayesian Generative Brain/Behavior Modelling in Python"
+message: "If you use GBM Toolbox, please cite the software release and the CBM/HBI methodological paper listed below."
+type: software
+version: 0.1.0
+date-released: 2026-09-11
+authors:
+  - name: "GBM Toolbox contributors"
+repository-code: "https://github.com/ginobattistello/BayesGBM"
+license: MIT
+preferred-citation:
+  type: article
+  title: "Hierarchical Bayesian inference for concurrent model fitting and comparison for group studies"
+  authors:
+    - family-names: Piray
+      given-names: Payam
+    - family-names: Dezfouli
+      given-names: Amir
+    - family-names: Heskes
+      given-names: Tom
+    - family-names: Frank
+      given-names: Michael J.
+    - family-names: Daw
+      given-names: Nathaniel D.
+  journal: PLOS Computational Biology
+  year: 2019
+  doi: "10.1371/journal.pcbi.1007043"

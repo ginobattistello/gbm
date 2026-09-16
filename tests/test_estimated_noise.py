@@ -1,0 +1,54 @@
+import jax.numpy as jnp
+import numpy as np
+from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit
+
+
+def test_estimated_q_r_are_positive_and_in_full_posterior():
+    def evolution(x, theta, u_t, y_t):
+        return jnp.asarray([theta[0] * x[0]])
+    def observation(x, phi, u_t):
+        return x[0] + phi[0]
+    model = StateModel(
+        evolution=evolution,
+        observation=observation,
+        family="gaussian",
+        priors=Priors(GaussianPrior([0.7], [0.0]), GaussianPrior([0.0], [0.0])),
+        initial_state=[0.0],
+        initial_state_covariance=[1.0],
+        process_covariance="diagonal",
+        process_noise_prior=GaussianPrior([-1.2], [0.5]),
+        observation_covariance="diagonal",
+        observation_noise_prior=GaussianPrior([-0.7], [0.5]),
+        observation_dim=1,
+    )
+    rng = np.random.default_rng(0)
+    y = rng.normal(size=20)
+    fit = individual_fit([{"y": y, "u": None}], model, config=Config(num_init=1, maxiter=100, verbose=False))
+    assert fit.output.process_noise_sd.shape == (1,1)
+    assert fit.output.observation_noise_sd.shape == (1,1)
+    assert fit.output.process_noise_sd[0,0] > 0
+    assert fit.output.observation_noise_sd[0,0] > 0
+    assert fit.output.parameters.shape[1] == 4
+    assert fit.math.hessian[0].shape == (2,2)  # only Q/R are free
+
+
+def test_theta_phi_only_hard_bounds_remain_valid_with_internal_noise():
+    def evolution(x, theta, u_t, y_t):
+        return jnp.asarray([theta[0] * x[0]])
+
+    def observation(x, phi, u_t):
+        return x[0] + phi[0]
+
+    model = StateModel(
+        evolution=evolution,
+        observation=observation,
+        family="gaussian",
+        priors=Priors(GaussianPrior([0.7], [0.2]), GaussianPrior([0.0], [0.2])),
+        initial_state=[0.0],
+        observation_covariance="diagonal",
+        observation_noise_prior=GaussianPrior([-0.7], [0.5]),
+    )
+    data = [{"y": np.zeros(6), "u": None}]
+    cfg = Config(num_init=1, maxiter=20, verbose=False, hard_bounds=[(-0.99, 0.99), (-2.0, 2.0)])
+    fit = individual_fit(data, model, config=cfg)
+    assert fit.output.parameters.shape[1] == 3

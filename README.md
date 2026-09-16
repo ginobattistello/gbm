@@ -1,0 +1,276 @@
+# GBM Toolbox
+
+**Bayesian Generative Brain/Behavior Modelling in Python**
+
+GBM Toolbox is a research toolbox for fitting generative brain/behavior models,
+quantifying uncertainty over static parameters and latent states, checking
+model adequacy, and comparing models at group level.
+
+GBM Toolbox is scientifically derived from the Computational Behavioral Modeling
+(CBM) framework and the HBI method of Piray et al. (2019). The public API and
+numerical implementation are redesigned around a single generative state model.
+See [NOTICE.md](NOTICE.md).
+
+## Core model
+
+A modeller defines two scientific functions:
+
+```python
+def evolution(x, theta, u_t, y_t):
+    # latent state x_t -> x_{t+1}
+    ...
+
+def observation(x, phi, u_t):
+    # latent state x_t -> observation prediction
+    ...
+```
+
+Notation:
+
+- `x`: dynamic latent state;
+- `theta`: static evolution parameters;
+- `phi`: static observation parameters;
+- `u_t`: arbitrary known trial inputs;
+- `y_t`: observed outcome on the current trial.
+
+The trial order is:
+
+```text
+x_t -> observation -> likelihood of y_t -> evolution -> x_{t+1}
+```
+
+The observation function returns the natural parameter of the outcome
+distribution, not a probability:
+
+- Gaussian: predicted mean;
+- Bernoulli: the logit, `log(p / (1 - p))`;
+- categorical: a vector of logits.
+
+GBM Toolbox applies the sigmoid or softmax itself and constructs the
+likelihood. Returning a probability applies the transform twice, which fits a
+different model from the one you wrote.
+
+## Minimal example
+
+```python
+import jax
+import jax.numpy as jnp
+from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit
+
+
+def evolution(x, theta, u_t, y_t):
+    alpha = jax.nn.sigmoid(theta[0])
+    choice = y_t.astype(jnp.int32)
+    reward = u_t["reward"]
+    return x.at[choice].add(alpha * (reward - x[choice]))
+
+
+def observation(x, phi, u_t):
+    beta = jnp.exp(phi[0])
+    return beta * (x[1] - x[0])  # Bernoulli logit
+
+
+model = StateModel(
+    evolution=evolution,
+    observation=observation,
+    family="bernoulli",
+    priors=Priors(
+        evolution=GaussianPrior([0.0], [1.0], names=["alpha_raw"]),
+        observation=GaussianPrior([1.0], [1.0], names=["log_beta"]),
+    ),
+    initial_state=[0.5, 0.5],
+    state_names=["Q0", "Q1"],
+)
+
+fit = individual_fit(
+    data,
+    model,
+    config=Config(
+        latent_uncertainty="propagated",
+        display=True,
+    ),
+)
+```
+
+The static parameter dimension is inferred from the priors. A zero prior
+variance fixes that static parameter at its prior mean.
+
+## Data
+
+Each subject is represented as:
+
+```python
+data[n] = {
+    "y": outcomes,
+    "u": inputs,
+}
+```
+
+`u` is deliberately generic. It may be `None`, a trialwise array, or a
+dictionary whose non-scalar values have first dimension equal to the number of
+trials. GBM Toolbox never requires field names such as `reward` or `stimulus`.
+
+Field values must be numeric or boolean, so a categorical condition is encoded
+as a numeric code (`0`/`1`) rather than a string label.
+
+## Latent uncertainty
+
+Three reporting settings are available:
+
+```python
+Config(latent_uncertainty="none")
+Config(latent_uncertainty="propagated")
+Config(latent_uncertainty="filtered")
+```
+
+There are exactly two uncertainty methods:
+
+**Propagated uncertainty** samples static parameters from the final Laplace
+posterior and reruns the state model. The same algorithm is used for Gaussian,
+Bernoulli, and categorical outcomes. Output includes trial-wise covariance,
+standard deviation, and empirical credible intervals.
+
+**Filtered uncertainty** reports uncertainty intrinsic to the latent state,
+conditional on fitted static parameters. Gaussian observations use an extended
+Kalman filter. Bernoulli and categorical observations use a local
+Laplace-Gaussian approximation with Fisher scoring. The latter is approximate
+Bayesian filtering and is labelled explicitly as such.
+
+`latent_uncertainty` controls what is retained and displayed. It does not turn
+a deterministic model into a stochastic model. If `initial_state_covariance`
+or `process_covariance` is non-zero, filtering is part of likelihood evaluation
+regardless of the display setting.
+
+## State and observation covariance
+
+For stochastic state evolution:
+
+```text
+x_{t+1} = f(x_t, theta, u_t, y_t) + eta_t
+eta_t ~ N(0, Q_t)
+```
+
+`process_covariance` is `Q_t`; its dimension is the number of latent states.
+It can be a scalar, diagonal vector, full covariance matrix, callable, or
+`None` for deterministic state evolution.
+
+For Gaussian observations:
+
+```text
+y_t = g(x_t, phi, u_t) + epsilon_t
+epsilon_t ~ N(0, R_t)
+```
+
+`observation_covariance` is `R_t` and is required for Gaussian models. It can
+be fixed or computed from `phi`. Bernoulli/categorical observation families do
+not use an additional `R_t`.
+
+## MAP and Laplace inference
+
+GBM Toolbox deliberately separates optimizer curvature from Laplace curvature:
+
+```text
+multi-start L-BFGS-B
+        -> final MAP
+        -> independently recomputed observed posterior Hessian (autodiff)
+        -> posterior covariance + Laplace evidence
+```
+
+The quasi-Newton approximation maintained by L-BFGS-B is never used for
+Laplace inference. The final observed Hessian is not repaired by eigenvalue
+clipping. A valid MAP may therefore coexist with an invalid Laplace
+approximation, which is explicitly flagged.
+
+The Fisher curvature used inside the discrete filter is also distinct from the
+outer observed Hessian and is never substituted for it.
+
+## Diagnostics and checks
+
+A centralized preflight validator checks data, outcome support, trial-input
+lengths, parameter/prior dimensions, names, state dimensions, covariance
+validity, model outputs, and a full prior-mean likelihood evaluation before
+optimization.
+
+Candidate-specific numerical failures are recorded separately during
+optimization.
+
+Available diagnostics include:
+
+```python
+from gbmtoolbox import (
+    convergence_diagnostics,
+    posterior_hessian_diagnostics,
+    prior_preconditioned_information,
+    numerical_local_identifiability,
+)
+```
+
+GBM Toolbox also provides prior sensitivity and prior/posterior predictive checks.
+
+## BMS and HBI
+
+```python
+from gbmtoolbox import bms, hbi_main
+```
+
+`bms` performs random-effects Dirichlet Bayesian model selection from a
+subjects-by-models log-evidence matrix.
+
+`hbi_main` currently implements a compact hierarchical empirical-Bayes/Laplace
+refitting approximation inspired by the CBM/HBI framework of Piray et al. (2019).
+It updates model-specific Gaussian group priors by responsibility-weighted
+posterior moment matching and uses GBM Toolbox's MAP plus independently recomputed
+observed-Hessian pipeline for each subject refit. It is deliberately labelled as
+an HBI-inspired implementation rather than a line-by-line reproduction of the
+original HBI variational equations.
+
+## Tutorials
+
+`examples/` contains standalone commented tutorials:
+
+1. `01_individual_fit.py` — deterministic learning model with propagated latent uncertainty;
+2. `02_continuous_fit.py` — Gaussian outcomes and observation covariance;
+3. `03_bms.py` — random-effects Bayesian model selection;
+4. `04_hbi.py` — HBI-inspired hierarchical empirical-Bayes refitting;
+5. `05_fixed_parameters.py` — fixed static parameters via zero prior variance;
+6. `06_diagnostics.py` — convergence, Hessian, information and local identifiability;
+7. `07_predictive_checks.py` — prior and posterior predictive checks;
+8. `08_filtered_state_model.py` — internal latent-state uncertainty from filtering.
+
+## Documentation
+
+- [docs/MANUAL.md](docs/MANUAL.md) — what the toolbox estimates, the
+  mathematics behind it, and how to write a model.
+- [docs/VALIDATION.md](docs/VALIDATION.md) — how the toolbox is checked and
+  what the reference cases currently measure.
+
+## Installation
+
+Python 3.10 or newer is required. The inference core is built on JAX, which is
+installed automatically as a dependency.
+
+```bash
+git clone https://github.com/ginobattistello/BayesGBM.git
+cd BayesGBM
+python -m pip install -e ".[dev]"
+```
+
+Run tests:
+
+```bash
+python -m pytest -q
+```
+
+Run the scientific reference scripts in `gbmtoolbox/dev/` after tests. They are
+method-validation scripts, not informal demos.
+
+## Citation and provenance
+
+For the CBM/HBI methodological lineage, cite:
+
+Piray P, Dezfouli A, Heskes T, Frank MJ, Daw ND (2019). *Hierarchical Bayesian
+inference for concurrent model fitting and comparison for group studies.*
+PLoS Computational Biology. DOI: 10.1371/journal.pcbi.1007043.
+
+For the first GBM Toolbox archival release, update `CITATION.cff`, create a tagged
+GitHub release, and archive it with Zenodo.
