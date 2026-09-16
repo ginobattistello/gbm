@@ -5,7 +5,6 @@ Behavioral Modeling (CBM) Python toolbox and its methodological framework.
 
 Source lineage:
 
-- development starting point: https://github.com/ginobattistello/cbm_python
 - original CBM Python repository: https://github.com/payampiray/cbm_python
 - CBM/HBI methodological reference: Piray et al. (2019),
   DOI: 10.1371/journal.pcbi.1007043
