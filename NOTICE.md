@@ -23,6 +23,3 @@ The Bernoulli/categorical state filter is a local Laplace-Gaussian
 approximation using Fisher scoring. It is approximate, not exact Bayesian
 filtering. The implementation is validated against numerical reference cases
 in `gbmtoolbox/dev/` and `tests/`.
-
-Before the first archival release, replace generic contributor metadata in
-`CITATION.cff` and `pyproject.toml` with final author information.
