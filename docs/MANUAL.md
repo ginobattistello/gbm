@@ -179,7 +179,7 @@ against a restricted version of itself.
 The toolbox estimates the **maximum a posteriori** value — the parameter vector
 maximising the posterior density:
 
-$$\hat{p} = \arg\max_{p}\; \log p(y \mid p) + \log p(p)$$
+$$\hat{p} = \arg\max_{p}\ \log p(y \mid p) + \log p(p)$$
 
 Search is multi-start L-BFGS-B, from several starting points, keeping the best
 optimum found. The default is four starts (`Config(num_init=...)`).
@@ -190,7 +190,7 @@ Around the MAP, the posterior is approximated by the Gaussian that matches its
 curvature. Writing $H$ for the observed Hessian of the negative log posterior at
 $\hat p$:
 
-$$p(p \mid y) \;\approx\; \mathcal{N}\!\left(\hat{p},\; H^{-1}\right)$$
+$$p(p \mid y) \\approx\ \mathcal{N}\\left(\hat{p},\ H^{-1}\right)$$
 
 Parameter standard errors are the square roots of the diagonal of $H^{-1}$.
 
@@ -213,18 +213,20 @@ technicality to be smoothed over.
 The same Hessian gives the Laplace approximation to the log marginal
 likelihood:
 
-$$\log p(y) \;\approx\; \log p(y \mid \hat{p}) + \log p(\hat{p}) + \frac{d}{2}\log 2\pi - \frac{1}{2}\log\det H$$
+$$\log p(y) \\approx\ \log p(y \mid \hat{p}) + \log p(\hat{p}) + \frac{d}{2}\log 2\pi - \frac{1}{2}\log\det H$$
 
 for $d$ free parameters. The final term penalises models whose fit depends on
 finely tuned parameters, which is how the evidence embodies a complexity
 penalty without an arbitrary term. This feeds model comparison.
+
+For a stochastic model the first term $\log p(y\mid\hat p)$ is the filtering likelihood, in which the state has already been integrated out (see Filtering). This contributes a second, per-trial complexity penalty in addition to $-\tfrac12\log\det H$. Evidences remain comparable across models, but for Bernoulli and categorical outcomes the inner integral is itself a Laplace approximation, so the evidence inherits that approximation error.
 
 ## Filtering: when the state is uncertain
 
 If the state is stochastic, the likelihood of a trial is not conditional on a
 single state value. The state must be integrated out:
 
-$$p(y_t \mid y_{1:t-1}, \theta, \phi) = \int p(y_t \mid x_t, \phi)\; p(x_t \mid y_{1:t-1}, \theta, \phi)\; dx_t$$
+$$p(y_t \mid y_{1:t-1}, \theta, \phi) = \int p(y_t \mid x_t, \phi)\ p(x_t \mid y_{1:t-1}, \theta, \phi)\ dx_t$$
 
 This is the filtering likelihood, and it is evaluated at *every* parameter
 vector the optimiser tries — it is part of estimation, not a post-hoc summary.
@@ -313,8 +315,42 @@ and individual fits are estimated together, so each subject is regularised
 toward the group while the group is estimated from the subjects. It updates
 model-specific Gaussian group priors by responsibility-weighted posterior moment
 matching, using the MAP and independently recomputed observed Hessian for each
-refit. It is an HBI-*inspired* implementation, not a line-by-line reproduction
-of the original variational equations.
+refit.
+
+### Differences from the original HBI
+
+This is an HBI-*inspired* implementation, not a reproduction of the variational
+equations in Piray et al. (2019) or of the reference `cbm` code. The iteration
+structure is the same — alternate between per-subject MAP/Laplace fits under the
+current group prior, responsibility assignment, and a group-prior update — but
+the following differ deliberately:
+
+- **Empirical Bayes rather than full variational Bayes.** The original places a
+  Normal-Gamma hyperprior on the group mean and precision and updates its
+  variational parameters (`a`, `beta`, `nu`, `sigma`). Here the group prior is
+  re-estimated directly by moment matching from the weighted subject posteriors,
+  with no hyperprior and no shrinkage toward a prior group mean. Consequently
+  there is no `group_hierarchical_errorbar`: uncertainty on the group mean is
+  not propagated.
+- **Full covariance instead of diagonal.** The original tracks only the diagonal
+  of the inverse Hessian and assumes a diagonal group precision. Here the group
+  covariance is a full matrix, built from each subject's complete Laplace block
+  plus the between-subject spread, then symmetrised and eigenvalue-floored to
+  stay positive definite.
+- **Responsibilities from Laplace evidence.** Responsibilities combine the full
+  Laplace log evidence with `psi(alpha) - psi(sum(alpha))`. The original instead
+  uses `logf - 0.5*log|A|` corrected by expected-precision terms arising from the
+  variational bound.
+- **No free-energy bound.** The original monitors the variational lower bound and
+  reports exceedance and protected exceedance probabilities. Convergence here is
+  assessed on changes in model frequency and group means, and no bound is
+  computed; use `bms` for exceedance probabilities.
+- **Scope.** Group refitting applies to evolution (`theta`) and observation
+  (`phi`) parameters only. Process- and observation-noise priors stay at their
+  model-level specification, though noise parameters are still fitted per subject
+  and enter each subject's Hessian and evidence. Fixed parameters are restored
+  exactly after each update.
+
 
 ## Reading the result
 
