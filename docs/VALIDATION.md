@@ -211,7 +211,7 @@ fixed, are they recovered, and does the posterior reflect their joint curvature?
 **Reference.** Data simulated from known $Q = 0.08$ and $R = 0.30$.
 
 **Result.** Recovered $Q = 0.0926$, $R = 0.3123$. The posterior correlation
-matrix carries non-zero joint $Q$/$R$ curvature, confirming the noise
+matrix carries non-zero joint $Q/R$ curvature, confirming the noise
 parameters enter the full posterior rather than being profiled out.
 
 ---
