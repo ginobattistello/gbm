@@ -67,9 +67,8 @@ def continuous_model():
             observation=GaussianPrior([0.0], [1.0], names=["offset"]),
         ),
         initial_state=[0.0],
-        observation_covariance="diagonal",
-        observation_noise_prior=GaussianPrior([np.log(0.50)], [1.0], names=["log_sigma_y"]),
-        observation_dim=1,
+        # Gaussian outcomes estimate their observation noise by default; pass
+        # observation_covariance only to fix R at a known measurement error.
         state_names=["x"],
         name="continuous state model",
     )
@@ -105,9 +104,8 @@ def filtered_continuous_model():
         initial_state_covariance=[1.0],
         process_covariance="diagonal",
         process_noise_prior=GaussianPrior([np.log(np.sqrt(0.10))], [0.5], names=["log_process_sd"]),
-        observation_covariance="diagonal",
-        observation_noise_prior=GaussianPrior([np.log(0.50)], [0.5], names=["log_observation_sd"]),
-        observation_dim=1,
+        # Process noise is opt-in and needs its own prior; observation noise is
+        # estimated by default, so R needs no argument here.
         state_names=["hidden_state"],
         name="stochastic continuous state model",
     )

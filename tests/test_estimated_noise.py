@@ -52,3 +52,30 @@ def test_theta_phi_only_hard_bounds_remain_valid_with_internal_noise():
     cfg = Config(num_init=1, maxiter=20, verbose=False, hard_bounds=[(-0.99, 0.99), (-2.0, 2.0)])
     fit = individual_fit(data, model, config=cfg)
     assert fit.output.parameters.shape[1] == 3
+
+
+def test_default_observation_noise_matches_analytic_posterior_mode():
+    """Omitted observation_covariance must reproduce the closed-form posterior mode."""
+    from scipy.optimize import brentq
+
+    from gbmtoolbox.parameters import DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
+
+    mu, v = 1.25, DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
+    rng = np.random.default_rng(11)
+    y = mu + rng.normal(scale=0.4, size=300)
+
+    model = StateModel(
+        evolution=lambda x, theta, u_t, y_t: x,
+        observation=lambda x, phi, u_t: mu,
+        family="gaussian",
+        priors=Priors(GaussianPrior([0.0], [0.0]), GaussianPrior([0.0], [0.0])),
+        initial_state=[0.0],
+    )
+    assert model.observation_covariance_mode == "diagonal"
+
+    fit = individual_fit([{"y": y, "u": None}], model, config=Config(num_init=3, verbose=False))
+    fitted = float(fit.output.observation_noise_sd[0, 0])
+
+    T, S = y.size, float(np.sum((y - mu) ** 2))
+    reference = np.exp(brentq(lambda r: r + v * (T - S * np.exp(-2.0 * r)), -20.0, 20.0))
+    assert abs(fitted - reference) / reference < 1e-3

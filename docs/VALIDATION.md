@@ -31,7 +31,7 @@ for f in gbmtoolbox/dev/*.py; do python "$f"; done   # scientific layer
 | Platform | Darwin arm64 |
 | Date | 2026-09-16 |
 
-**Automated suite: 49 passed, 0 failed. Reference scripts: 9 of 9 pass.**
+**Automated suite: 51 passed, 0 failed. Reference scripts: 10 of 10 pass.**
 
 CI additionally runs the suite on Python 3.10, 3.11, 3.12 and 3.13.
 
@@ -213,6 +213,32 @@ fixed, are they recovered, and does the posterior reflect their joint curvature?
 **Result.** Recovered $Q = 0.0926$, $R = 0.3123$. The posterior correlation
 matrix carries non-zero joint $Q/R$ curvature, confirming the noise
 parameters enter the full posterior rather than being profiled out.
+
+## 10. Default observation-noise prior against the analytic posterior mode
+
+`08_default_observation_noise.py`
+
+**Question.** When `observation_covariance` is omitted, a Gaussian model
+estimates $R$ under a default $\rho \sim \mathcal{N}(0, 2)$ prior on
+$\rho = \log \sigma$. Does the fitted value match what that model implies
+analytically, and how far does the prior bend it away from the data?
+
+**Reference.** For a constant-mean Gaussian with the mean fixed, the log
+posterior in $\rho$ is closed-form,
+
+$$L(\rho) = -T\rho - \frac{S}{2e^{2\rho}} - \frac{\rho^2}{2v}, \qquad S = \sum_t (y_t - \mu)^2,$$
+
+so the posterior mode solves $\rho + v\,(T - S e^{-2\rho}) = 0$. That root is
+found independently by Brent's method; the unpenalised MLE $\sigma^2 = S/T$ is
+reported alongside it so the prior's influence is visible.
+
+**Criterion.** Relative error above `1e-3` against the analytic mode fails.
+
+**Result.** Worst relative error `7.6e-09` across four cases spanning
+$\sigma \in [0.3, 2.5]$ and $T \in [200, 800]$ — the estimator reproduces the
+analytic posterior mode. Shrinkage against the unpenalised MLE is `+0.65%` at
+$T = 50$, `+0.16%` at $T = 200$ and `+0.03%` at $T = 1000$, confirming the
+default prior is weakly informative and vanishes with data.
 
 ---
 

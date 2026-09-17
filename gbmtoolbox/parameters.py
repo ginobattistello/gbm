@@ -8,6 +8,25 @@ import numpy as np
 
 from .priors import GaussianPrior, Priors, broadcast_prior
 
+#: Prior variance on ``log_observation_sd`` when the modeller does not supply
+#: ``observation_noise_prior``.  A zero-mean Gaussian on the log standard
+#: deviation is log-normal on the standard deviation itself, so this places a
+#: 95% prior interval of roughly ``[0.06, 16]`` on the observation SD --
+#: weakly informative, and wider than the ``Ga(1,1)`` Jeffreys prior on noise
+#: precision used by the VBA toolbox, whose implied SD interval is
+#: approximately ``[0.52, 6.28]``.  It is documented rather than hidden because
+#: it enters the Laplace evidence like any other prior.
+DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE = 2.0
+
+
+def default_observation_noise_prior(dim: int) -> GaussianPrior:
+    """Weakly-informative fallback prior on ``log_observation_sd``."""
+    return GaussianPrior(
+        [0.0] * dim,
+        [DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE] * dim,
+        names=tuple(f"log_observation_sd[{i}]" for i in range(dim)) if dim > 1 else ("log_observation_sd",),
+    )
+
 
 @dataclass(frozen=True)
 class ParameterLayout:
@@ -79,7 +98,7 @@ def build_parameter_layout(
     pr = None
     if observation_noise_dim:
         if observation_noise_prior is None:
-            raise ValueError("observation_noise_prior is required when observation_covariance='diagonal'")
+            observation_noise_prior = default_observation_noise_prior(observation_noise_dim)
         pr = broadcast_prior(observation_noise_prior, observation_noise_dim, prefix="log_observation_sd")
         blocks.append(pr)
         observation_slice = slice(cursor, cursor + pr.dim)

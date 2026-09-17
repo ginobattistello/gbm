@@ -161,8 +161,12 @@ y_t = g(x_t, phi, u_t) + epsilon_t
 epsilon_t ~ N(0, R_t)
 ```
 
-`observation_covariance` is `R_t` and is required for Gaussian models. It can
-be fixed or computed from `phi`. Bernoulli/categorical observation families do
+`observation_covariance` is `R_t`. For Gaussian models it is **estimated by
+default**: omit it and the toolbox infers `R = diag(exp(2 * log_observation_sd))`
+under a weakly-informative `N(0, 2)` prior, since a Gaussian likelihood does not
+exist without it. Pass a scalar, vector, matrix or callable to fix `R` at a
+known measurement error instead, or supply `observation_noise_prior` to keep it
+estimated under your own prior. Bernoulli/categorical observation families do
 not use an additional `R_t`.
 
 ## MAP and Laplace inference

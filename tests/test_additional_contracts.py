@@ -6,6 +6,7 @@ from gbmtoolbox import (
     prior_sensitivity, bms,
 )
 from gbmtoolbox.display import _trace_styles
+from gbmtoolbox.parameters import DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
 from gbmtoolbox.validation import validate_fit_spec
 
 
@@ -32,9 +33,19 @@ def test_process_covariance_dimension_follows_state_not_theta():
     assert m.process_covariance_matrix(np.zeros(3),None).shape==(2,2)
 
 
-def test_gaussian_requires_observation_covariance():
-    with pytest.raises(ValueError, match="require observation_covariance"):
-        StateModel(lambda x,t,u,y:x,lambda x,p,u:[0.],"gaussian",_fixed_priors(),[0])
+def test_gaussian_defaults_to_estimated_observation_covariance():
+    m=StateModel(lambda x,t,u,y:x,lambda x,p,u:[0.],"gaussian",_fixed_priors(),[0])
+    assert m.observation_covariance_mode=="diagonal"
+    assert "log_observation_sd" in m.parameter_layout.names
+    var=np.diag(m.parameter_layout.covariance)[m.parameter_layout.observation_noise_slice]
+    assert var==pytest.approx([DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE])
+
+
+def test_explicit_observation_covariance_overrides_default():
+    m=StateModel(lambda x,t,u,y:x,lambda x,p,u:[0.],"gaussian",_fixed_priors(),[0],observation_covariance=0.25)
+    assert m.observation_covariance_mode=="fixed"
+    assert "log_observation_sd" not in m.parameter_layout.names
+    assert float(m.observation_covariance_matrix(np.zeros(1),None,1)[0,0])==pytest.approx(0.25)
 
 
 def test_discrete_rejects_observation_covariance():

@@ -159,9 +159,42 @@ For Gaussian outcomes there is a second noise term,
 
 $$y_t = g(x_t, \phi, u_t) + \varepsilon_t, \qquad \varepsilon_t \sim \mathcal{N}(0, R_t)$$
 
-set through `observation_covariance`, which is required for Gaussian models.
-Bernoulli and categorical outcomes take no extra $R_t$: their noise is already
-in the outcome distribution.
+set through `observation_covariance`. Bernoulli and categorical outcomes take
+no extra $R_t$: their noise is already in the outcome distribution, and passing
+`observation_covariance` for them is an error.
+
+**Gaussian observation noise is estimated by default.** A Gaussian model has no
+likelihood at all without $R_t$ — the predictor $g$ is a point, and a point
+assigns zero density to a continuous outcome. So omitting `observation_covariance`
+does not mean "no observation noise"; it means *estimate it*. The toolbox then
+appends `log_observation_sd` to the parameter vector and infers
+$R = \mathrm{diag}(e^{2\rho})$ from the data, under a default
+$\rho \sim \mathcal{N}(0, 2)$ prior.
+
+That default is weakly informative by construction: a Gaussian prior on the log
+standard deviation is log-normal on the standard deviation, giving a 95% prior
+interval of roughly $[0.06, 16]$ on the observation SD. For comparison, the
+`Ga(1,1)` Jeffreys prior on noise precision used by the VBA toolbox implies an
+SD interval of about $[0.52, 6.28]$, so this default is the weaker of the two.
+Measured against the unpenalised MLE it moves the estimate by about 0.6% at
+$T = 50$ and 0.03% at $T = 1000$ (see `docs/VALIDATION.md`, §10).
+
+The prior is documented rather than hidden because it enters the Laplace
+evidence like any other prior. Override it with `observation_noise_prior` when
+you know the noise scale, or pin $R$ outright by passing a scalar, vector,
+matrix or callable to `observation_covariance` when the measurement error is
+known independently:
+
+```python
+StateModel(..., family="gaussian")                            # estimate R (default)
+StateModel(..., family="gaussian", observation_covariance=0.25)  # fix R = 0.25
+StateModel(..., family="gaussian",                            # estimate R, own prior
+           observation_noise_prior=GaussianPrior([np.log(0.5)], [0.5]))
+```
+
+For multivariate Gaussian outcomes, set `observation_dim` (or supply a matching
+vector `observation_noise_prior`) so the estimated diagonal has one entry per
+observed dimension.
 
 The distinction matters because it changes the likelihood, not just the
 reporting. If the state is uncertain, it must be integrated out (below). If it

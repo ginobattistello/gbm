@@ -142,12 +142,8 @@ class StateModel:
         rmode = _mode(self.observation_covariance)
         if family != "gaussian" and rmode != "none":
             raise ValueError("observation_covariance is only used for Gaussian outcomes")
-        if family == "gaussian" and rmode == "none":
-            raise ValueError("Gaussian models require observation_covariance (fixed, callable, or 'diagonal')")
         if qmode == "diagonal" and self.process_noise_prior is None:
             raise ValueError("process_noise_prior is required when process_covariance='diagonal'")
-        if rmode == "diagonal" and self.observation_noise_prior is None:
-            raise ValueError("observation_noise_prior is required when observation_covariance='diagonal'")
         if self.observation_dim is not None and int(self.observation_dim) < 1:
             raise ValueError("observation_dim must be >= 1")
 
@@ -175,7 +171,12 @@ class StateModel:
 
     @property
     def observation_covariance_mode(self) -> str:
-        return _mode(self.observation_covariance)
+        mode = _mode(self.observation_covariance)
+        if mode == "none" and self.family == "gaussian":
+            # Gaussian outcomes have no likelihood without R, so an omitted
+            # observation_covariance means "estimate it" rather than "no noise".
+            return "diagonal"
+        return mode
 
     @property
     def resolved_observation_dim(self) -> int:
