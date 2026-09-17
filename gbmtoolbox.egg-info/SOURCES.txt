@@ -31,6 +31,7 @@ gbmtoolbox/dev/04_bernoulli_filter_quadrature.py
 gbmtoolbox/dev/05_categorical_filter_quadrature.py
 gbmtoolbox/dev/06_propagated_uncertainty.py
 gbmtoolbox/dev/07_information_identifiability.py
+gbmtoolbox/dev/08_default_observation_noise.py
 gbmtoolbox/dev/validate_ad_derivatives.py
 gbmtoolbox/dev/validate_noise_recovery.py
 gbmtoolbox/examples/01_individual_fit.py
