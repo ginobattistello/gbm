@@ -409,3 +409,17 @@ PLoS Computational Biology. DOI: 10.1371/journal.pcbi.1007043.
 
 For the first GBM Toolbox archival release, update `CITATION.cff`, create a tagged
 GitHub release, and archive it with Zenodo.
+
+## Development, AI assistance and contributions
+
+This toolbox was designed and written by its authors with the assistance of AI
+coding tools. Every part of the resulting code, mathematics and documentation was
+reviewed manually by the authors, and the inference machinery was additionally
+validated against independent implementations, in particular the VBA toolbox in
+MATLAB, on a real dataset that had already been analysed with it.
+
+AI assistance does not remove the possibility of error, and the authors make no
+claim that this review is exhaustive. Contributions of every kind are therefore
+warmly encouraged: bug reports, independent replication, method review,
+corrections to the mathematics or the documentation, additional validation cases,
+and critical reading of the present work. Please open an issue or a pull request.
