@@ -142,8 +142,8 @@ readable.
 ## Models with no latent dynamics
 
 Not every model has a state that evolves. When the outcome on each trial
-depends only on that trial's inputs -- a psychometric function, a regression on
-stimulus features -- omit the evolution function and the evolution prior:
+depends only on that trial's inputs – a psychometric function, a regression on
+stimulus features – omit the evolution function and the evolution prior:
 
 ```python
 model = StateModel(
