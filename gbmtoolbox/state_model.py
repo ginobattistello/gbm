@@ -99,6 +99,11 @@ def _mode(value):
     return "custom" if callable(value) else "fixed"
 
 
+def _identity_evolution(x, theta, u_t, y_t):
+    """Default evolution for observation-only models: the state never changes."""
+    return x
+
+
 @dataclass(frozen=True)
 class StateModel:
     """Generative model used by all GBM Toolbox inference routines.
@@ -109,11 +114,16 @@ class StateModel:
     categorical outcomes it returns logits (not probabilities).
     """
 
-    evolution: Callable
-    observation: Callable
-    family: Family
-    priors: Priors
-    initial_state: Sequence[float]
+    evolution: Callable | None = None
+    observation: Callable | None = None
+    family: Family = "gaussian"
+    priors: Priors | None = None
+    #: Latent state on the first trial.  Observation-only models can leave this
+    #: at its default: with no evolution the state never changes, and an
+    #: observation function that ignores ``x`` gives the same fit whatever it
+    #: holds.  It is still carried because the trial recursion needs a state to
+    #: thread through.
+    initial_state: Sequence[float] = (0.0,)
     initial_state_covariance: object | None = None
     process_covariance: object | None = None
     observation_covariance: object | None = None
@@ -124,6 +134,20 @@ class StateModel:
     name: str | None = None
 
     def __post_init__(self):
+        if self.observation is None:
+            raise ValueError("an observation function is required")
+        if self.priors is None:
+            raise ValueError("priors are required")
+        if self.evolution is None:
+            # Observation-only model: the latent state never changes, so the
+            # evolution is the identity and there are no evolution parameters.
+            if self.priors.evolution.dim:
+                raise ValueError(
+                    "evolution is None but the evolution prior declares "
+                    f"{self.priors.evolution.dim} parameter(s); pass an evolution "
+                    "function or drop the evolution prior"
+                )
+            object.__setattr__(self, "evolution", _identity_evolution)
         family = str(self.family).lower()
         get_family(family)
         x0 = np.asarray(self.initial_state, dtype=float).reshape(-1)

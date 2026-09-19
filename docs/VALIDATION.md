@@ -226,19 +226,21 @@ analytically, and how far does the prior bend it away from the data?
 **Reference.** For a constant-mean Gaussian with the mean fixed, the log
 posterior in $\rho$ is closed-form,
 
-$$L(\rho) = -T\rho - \frac{S}{2e^{2\rho}} - \frac{\rho^2}{2v}, \qquad S = \sum_t (y_t - \mu)^2,$$
+$$L(\rho) = -T\rho - \frac{S}{2e^{2\rho}} - \frac{(\rho - m_0)^2}{2v}, \qquad S = \sum_t (y_t - \mu)^2,$$
 
-so the posterior mode solves $\rho + v\,(T - S e^{-2\rho}) = 0$. That root is
-found independently by Brent's method; the unpenalised MLE $\sigma^2 = S/T$ is
+so the posterior mode solves $(\rho - m_0) + v\,(T - S e^{-2\rho}) = 0$, where
+$\mathcal{N}(m_0, v)$ is the default prior — VBA's $\mathrm{Ga}(1,1)$ prior on
+observation precision, moment-matched onto the log scale. That root is found
+independently by Brent's method; the unpenalised MLE $\sigma^2 = S/T$ is
 reported alongside it so the prior's influence is visible.
 
 **Criterion.** Relative error above `1e-3` against the analytic mode fails.
 
-**Result.** Worst relative error `7.6e-09` across four cases spanning
+**Result.** Worst relative error `7.1e-09` across four cases spanning
 $\sigma \in [0.3, 2.5]$ and $T \in [200, 800]$ — the estimator reproduces the
-analytic posterior mode. Shrinkage against the unpenalised MLE is `+0.65%` at
-$T = 50$, `+0.16%` at $T = 200$ and `+0.03%` at $T = 1000$, confirming the
-default prior is weakly informative and vanishes with data.
+analytic posterior mode. Shrinkage against the unpenalised MLE is `+3.95%` at
+$T = 50$, `+0.94%` at $T = 200$ and `+0.18%` at $T = 1000$: the default prior
+is weakly informative and its influence vanishes with data.
 
 ---
 

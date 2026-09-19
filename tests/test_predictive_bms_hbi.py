@@ -1,5 +1,5 @@
 import numpy as np
-from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit, prior_predictive, posterior_predictive, bms, hbi_main, HBIConfig
+from gbmtoolbox import Config, individual_fit, prior_predictive, posterior_predictive, bms, hbi_main, HBIConfig
 
 
 def test_predictive_checks(binary_model,binary_data):

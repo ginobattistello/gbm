@@ -57,6 +57,30 @@ class LocalIdentifiability:
 
 
 @dataclass
+class ObservationNoiseCorrection:
+    """Observation-noise SD before and after correcting for parameter uncertainty.
+
+    ``residual_sd`` is the SD implied by the MAP residuals alone, which treats
+    the fitted parameters as known exactly.  ``corrected_sd`` additionally
+    accounts for posterior uncertainty in those parameters via the expected
+    residual energy under the Laplace posterior.
+
+    ``inflation_factor`` is ``corrected_sd / residual_sd``; values meaningfully
+    above 1 mean the model is flexible enough, relative to the number of
+    trials, that the MAP residuals understate the true observation noise.
+    """
+
+    residual_sd: np.ndarray
+    corrected_sd: np.ndarray
+    reported_sd: np.ndarray
+    uncertainty_trace: float
+    n_trials: int
+    n_free_parameters: int
+    inflation_factor: np.ndarray
+    valid: bool
+
+
+@dataclass
 class NoiseCorrelationSummary:
     parameter_names: tuple[str, ...]
     correlation: np.ndarray | None
@@ -222,3 +246,108 @@ def noise_parameter_correlations(fit, subject: int = 0) -> NoiseCorrelationSumma
     np.fill_diagonal(corr, 1.0)
     names = tuple(np.asarray(fit.input.parameter_names, dtype=object)[selected])
     return NoiseCorrelationSummary(names, corr)
+
+
+def observation_noise_correction(fit, subject: int = 0) -> ObservationNoiseCorrection:
+    r"""Observation noise corrected for posterior parameter uncertainty.
+
+    The MAP estimate of the observation noise is driven by the residuals at the
+    fitted parameters, :math:`r_t = y_t - g_t(\hat\theta)`.  That treats
+    :math:`\hat\theta` as known exactly, so a model flexible enough to absorb
+    part of the noise into its own parameters leaves residuals that are too
+    small and reports an observation SD that is too low.  With few trials, or
+    many parameters, the effect is large: with five free parameters and 25
+    trials the reported SD is biased low by roughly 10%.
+
+    This diagnostic recomputes the noise from the *expected* residual energy
+    under the Laplace posterior :math:`q(\theta) = N(\hat\theta, \Sigma)`.
+    Linearising the prediction around the MAP,
+
+    .. math::
+
+        E_q\!\left[\sum_t (y_t - g_t(\theta))^2\right]
+        \approx \sum_t \left(r_t^2 + J_t \Sigma J_t^\top\right),
+
+    where :math:`J_t` is the Jacobian of the trial-``t`` prediction with
+    respect to the free parameters.  The second term is the prediction
+    uncertainty induced by parameter uncertainty; adding it is what turns the
+    MLE-like estimate into the analogue of the unbiased :math:`SSE/(T-p)`.
+
+    ``J`` is obtained by differentiating the model's own trajectory, so this
+    works for dynamical models too: the derivative propagates through the
+    latent states exactly as the likelihood does.
+
+    This is a **diagnostic**: it reports what the noise would be under the
+    correction, and changes neither the fit nor its log-evidence.  A large
+    ``inflation_factor`` means the reported observation SD should not be taken
+    at face value.
+
+    The correction is evaluated once at the MAP, not iterated to
+    self-consistency (the posterior covariance itself depends on the noise
+    scale).  One step removes most of the bias; a small downward bias survives
+    at the smallest trial counts.  See
+    ``gbmtoolbox/dev/09_observation_noise_correction.py`` for the measured
+    behaviour against the analytic result for a linear model.
+
+    Only Gaussian observations have an estimated ``R``; other families return
+    an empty, ``valid=False`` result.
+    """
+    model = fit.model
+    if model.family != "gaussian":
+        empty = np.zeros(0)
+        return ObservationNoiseCorrection(empty, empty, empty, 0.0, 0, 0, empty, False)
+
+    covariance = fit.math.covariance[subject]
+    reported = np.asarray(fit.output.observation_noise_sd[subject], dtype=float)
+    free = np.asarray(fit.math.free_mask[subject], dtype=bool)
+    idx = np.flatnonzero(free)
+    if covariance is None or idx.size == 0:
+        # No valid Laplace posterior means no uncertainty to propagate.
+        empty = np.zeros(0)
+        return ObservationNoiseCorrection(empty, empty, reported, np.nan, 0, int(idx.size), empty, False)
+
+    sigma = np.asarray(covariance, dtype=float)[np.ix_(idx, idx)]
+    prepared = prepare_subject_data(fit.data[subject])
+    config = fit.profile.config
+    parameters = jnp.asarray(np.asarray(fit.output.parameters[subject], dtype=float))
+    idx_j = jnp.asarray(idx, dtype=jnp.int32)
+
+    def predictions_from_free(x):
+        full = parameters.at[idx_j].set(x)
+        out = model.evaluate_jax(
+            full,
+            prepared,
+            filter_max_iter=config.filter_max_iter,
+            filter_tol=config.filter_tol,
+            filter_damping=config.filter_damping,
+            filter_jitter=config.filter_jitter,
+        )
+        return jnp.atleast_2d(out["prediction"].reshape(out["prediction"].shape[0], -1))
+
+    x0 = parameters[idx_j]
+    predictions = np.asarray(predictions_from_free(x0), dtype=float)
+    jacobian = np.asarray(jax.jacrev(predictions_from_free)(x0), dtype=float)
+
+    y = np.asarray(fit.data[subject]["y"], dtype=float).reshape(predictions.shape[0], -1)
+    residual = y - predictions
+    n_trials, obs_dim = residual.shape
+
+    # Per output dimension: sum_t r_t^2 and sum_t J_t Sigma J_t^T.
+    sse = np.sum(residual**2, axis=0)
+    trace = np.einsum("tdi,ij,tdj->d", jacobian, sigma, jacobian)
+
+    residual_sd = np.sqrt(sse / n_trials)
+    corrected_sd = np.sqrt((sse + trace) / n_trials)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inflation = np.divide(corrected_sd, residual_sd, out=np.ones_like(corrected_sd), where=residual_sd > 0)
+
+    return ObservationNoiseCorrection(
+        residual_sd=residual_sd,
+        corrected_sd=corrected_sd,
+        reported_sd=reported,
+        uncertainty_trace=float(np.sum(trace)),
+        n_trials=int(n_trials),
+        n_free_parameters=int(idx.size),
+        inflation_factor=inflation,
+        valid=True,
+    )

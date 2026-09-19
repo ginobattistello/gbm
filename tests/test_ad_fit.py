@@ -1,5 +1,3 @@
-import jax
-import jax.numpy as jnp
 import numpy as np
 from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit
 

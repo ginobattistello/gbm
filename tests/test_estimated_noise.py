@@ -58,9 +58,13 @@ def test_default_observation_noise_matches_analytic_posterior_mode():
     """Omitted observation_covariance must reproduce the closed-form posterior mode."""
     from scipy.optimize import brentq
 
-    from gbmtoolbox.parameters import DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
+    from gbmtoolbox.parameters import (
+        DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN,
+        DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE,
+    )
 
-    mu, v = 1.25, DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
+    mu = 1.25
+    m0, v = DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN, DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
     rng = np.random.default_rng(11)
     y = mu + rng.normal(scale=0.4, size=300)
 
@@ -76,6 +80,8 @@ def test_default_observation_noise_matches_analytic_posterior_mode():
     fit = individual_fit([{"y": y, "u": None}], model, config=Config(num_init=3, verbose=False))
     fitted = float(fit.output.observation_noise_sd[0, 0])
 
+    # Stationary point of the log posterior in r = log_observation_sd, with a
+    # N(m0, v) prior: (r - m0) + v * (T - S * exp(-2r)) = 0.
     T, S = y.size, float(np.sum((y - mu) ** 2))
-    reference = np.exp(brentq(lambda r: r + v * (T - S * np.exp(-2.0 * r)), -20.0, 20.0))
+    reference = np.exp(brentq(lambda r: (r - m0) + v * (T - S * np.exp(-2.0 * r)), -20.0, 20.0))
     assert abs(fitted - reference) / reference < 1e-3

@@ -10,8 +10,11 @@ import numpy as np
 
 def _as_mean(value) -> np.ndarray:
     arr = np.asarray(value, dtype=float).reshape(-1)
-    if arr.size == 0 or not np.all(np.isfinite(arr)):
-        raise ValueError("prior mean must be a non-empty finite vector")
+    # An empty mean is allowed: it declares a parameter block with no
+    # parameters, which is how an observation-only model states that it has no
+    # evolution parameters.
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("prior mean must be a finite vector")
     return arr
 
 
@@ -20,6 +23,8 @@ def covariance_matrix(value, dim: int, *, name: str, allow_semidefinite: bool = 
     if value is None:
         raise ValueError(f"{name} cannot be None")
     arr = np.asarray(value, dtype=float)
+    if dim == 0:
+        return np.zeros((0, 0), dtype=float)
     if arr.ndim == 0:
         cov = np.eye(dim) * float(arr)
     elif arr.ndim == 1:
@@ -89,6 +94,11 @@ class GaussianPrior:
         object.__setattr__(self, "covariance", cov)
         object.__setattr__(self, "names", names)
 
+    @classmethod
+    def empty(cls) -> "GaussianPrior":
+        """A prior over no parameters, for a model with an empty block."""
+        return cls([], [], names=())
+
     @property
     def dim(self) -> int:
         return int(self.mean.size)
@@ -121,10 +131,22 @@ def broadcast_prior(prior: GaussianPrior, dim: int, *, prefix: str) -> GaussianP
 
 @dataclass(frozen=True)
 class Priors:
-    """Separate priors for static evolution and observation parameters."""
+    """Separate priors for static evolution and observation parameters.
 
-    evolution: GaussianPrior
-    observation: GaussianPrior
+    ``evolution`` may be omitted for an observation-only model, in which case
+    it becomes a prior over zero parameters and ``theta`` is an empty vector::
+
+        Priors(observation=GaussianPrior([0.0], [1.0], names=["slope"]))
+    """
+
+    evolution: GaussianPrior | None = None
+    observation: GaussianPrior | None = None
+
+    def __post_init__(self):
+        if self.observation is None:
+            raise ValueError("an observation prior is required")
+        if self.evolution is None:
+            object.__setattr__(self, "evolution", GaussianPrior.empty())
 
     @property
     def dim(self) -> int:

@@ -168,16 +168,25 @@ likelihood at all without $R_t$ — the predictor $g$ is a point, and a point
 assigns zero density to a continuous outcome. So omitting `observation_covariance`
 does not mean "no observation noise"; it means *estimate it*. The toolbox then
 appends `log_observation_sd` to the parameter vector and infers
-$R = \mathrm{diag}(e^{2\rho})$ from the data, under a default
-$\rho \sim \mathcal{N}(0, 2)$ prior.
+$R = \mathrm{diag}(e^{2\rho})$ from the data, under a default prior on $\rho$.
 
-That default is weakly informative by construction: a Gaussian prior on the log
-standard deviation is log-normal on the standard deviation, giving a 95% prior
-interval of roughly $[0.06, 16]$ on the observation SD. For comparison, the
-`Ga(1,1)` Jeffreys prior on noise precision used by the VBA toolbox implies an
-SD interval of about $[0.52, 6.28]$, so this default is the weaker of the two.
-Measured against the unpenalised MLE it moves the estimate by about 0.6% at
-$T = 50$ and 0.03% at $T = 1000$ (see `docs/VALIDATION.md`, §10).
+That default is the `Ga(1,1)` prior on observation *precision* used by the VBA
+toolbox, moment-matched onto the log standard deviation that the toolbox
+actually fits: $\rho \sim \mathcal{N}(0.2886, 0.4112)$. Matching moments does
+not preserve quantiles, so the implied 95% interval on the observation SD is
+about $[0.38, 4.69]$ against $[0.52, 6.29]$ for the exact Gamma; the two priors
+are close rather than identical.
+
+The prior is Gamma because that is the conjugate form and what VBA uses, but it
+is *fitted* on the log scale because the toolbox estimates noise inside one
+joint MAP/Laplace vector, and the exact noise posterior is far less skewed in
+$\log\sigma$ than in $\sigma^2$ (about $-0.28$ against $+1.29$ at $T = 25$), so
+the Gaussian Laplace approximation is much better there. A $\sigma^2$
+parameterisation would only be preferable under a variational scheme that keeps
+precision as a separate conjugate factor, as VBA does.
+
+Measured against the unpenalised MLE the prior moves the estimate by about 4.0%
+at $T = 50$ and 0.2% at $T = 1000$ (see `docs/VALIDATION.md`, §10).
 
 The prior is documented rather than hidden because it enters the Laplace
 evidence like any other prior. Override it with `observation_noise_prior` when
