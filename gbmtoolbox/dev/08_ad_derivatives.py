@@ -1,4 +1,5 @@
-"""Reference check: JAX observed Hessian agrees with central finite differences."""
+"""Reference check 08: JAX observed Hessian against central finite differences."""
+
 import jax.numpy as jnp
 import numpy as np
 

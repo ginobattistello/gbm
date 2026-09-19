@@ -1,10 +1,12 @@
 """Diagnostic plotting for GBM Toolbox individual fits."""
+
 from __future__ import annotations
 
 import numpy as np
 
 
 def _mpl():
+    """Import matplotlib lazily, so the toolbox imports without a display."""
     try:
         import matplotlib.pyplot as plt
     except ImportError as exc:
@@ -30,6 +32,7 @@ def _trace_styles(n: int):
 
 
 def _prediction_panel(ax, family, y, pred):
+    """Observed outcomes against the model's trial-wise prediction."""
     y = np.asarray(y)
     pred = np.asarray(pred)
     if family == "bernoulli":
@@ -58,6 +61,7 @@ def _prediction_panel(ax, family, y, pred):
 
 
 def _parameter_path_panel(ax, result, subject):
+    """Optimiser trajectory for each free parameter."""
     diag = result.math.diagnostics[subject]
     path = diag.search_path
     if path is None or len(path) == 0:
@@ -74,6 +78,7 @@ def _parameter_path_panel(ax, result, subject):
 
 
 def _objective_panel(ax, result, subject):
+    """Log joint along the winning optimiser path."""
     diag = result.math.diagnostics[subject]
     f = diag.search_log_joint
     if f is None or len(f) == 0:
@@ -87,6 +92,7 @@ def _objective_panel(ax, result, subject):
 
 
 def _parameter_estimates_panel(ax, result, subject):
+    """MAP estimates with their Laplace standard errors."""
     p = result.output.parameters[subject]
     cov = result.math.covariance[subject]
     sd = np.sqrt(np.maximum(np.diag(cov), 0.0)) if cov is not None else np.full(len(p), np.nan)
@@ -101,6 +107,7 @@ def _parameter_estimates_panel(ax, result, subject):
 
 
 def _latent_panel(ax, result, subject):
+    """Latent-state trajectory, with an uncertainty band when available."""
     est = result.output.latent[subject]["state"]
     mean = np.asarray(est["mean"], dtype=float)
     low = est.get("interval_low")
@@ -131,6 +138,7 @@ def _latent_panel(ax, result, subject):
 
 
 def _status_panel(ax, result, subject):
+    """Text panel repeating the fit's key numbers and warnings."""
     diag = result.math.diagnostics[subject]
     ax.axis("off")
     starts = diag.starts
@@ -152,17 +160,15 @@ def plot_subject(result, subject: int = 0, *, figsize=(10, 9), display=True, sav
     if not 0 <= subject < result.output.parameters.shape[0]:
         raise IndexError("subject index out of range")
     plt = _mpl()
-    with plt.rc_context({
-        "figure.dpi": 110,
-        "font.size": 8,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-    }):
+    with plt.rc_context({"figure.dpi": 110, "font.size": 8, "axes.spines.top": False, "axes.spines.right": False}):
         fig = plt.figure(figsize=figsize)
         gs = fig.add_gridspec(4, 2, height_ratios=[1, 1, 1, 0.75], hspace=0.6, wspace=0.35)
-        axA = fig.add_subplot(gs[0, 0]); axB = fig.add_subplot(gs[0, 1])
-        axC = fig.add_subplot(gs[1, 0]); axD = fig.add_subplot(gs[1, 1])
-        axE = fig.add_subplot(gs[2, :]); axF = fig.add_subplot(gs[3, :])
+        axA = fig.add_subplot(gs[0, 0])
+        axB = fig.add_subplot(gs[0, 1])
+        axC = fig.add_subplot(gs[1, 0])
+        axD = fig.add_subplot(gs[1, 1])
+        axE = fig.add_subplot(gs[2, :])
+        axF = fig.add_subplot(gs[3, :])
         _prediction_panel(axA, result.input.family, result.data[subject]["y"], result.output.prediction[subject])
         _parameter_path_panel(axB, result, subject)
         _objective_panel(axC, result, subject)

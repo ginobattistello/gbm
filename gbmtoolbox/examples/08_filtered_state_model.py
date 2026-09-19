@@ -1,6 +1,7 @@
 """Tutorial 08 — unified filtering with internally estimated diagonal Q and R."""
 
 import numpy as np
+
 from gbmtoolbox import Config, individual_fit
 from gbmtoolbox.examples.tutorial_models import filtered_continuous_model
 

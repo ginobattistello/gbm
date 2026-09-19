@@ -24,6 +24,7 @@ DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE = 0.25 * float(polygamma(1, _DEFAULT_A0
 
 
 def _observation_noise_names(dim: int) -> tuple[str, ...]:
+    """Name the estimated observation-noise SDs."""
     if dim > 1:
         return tuple(f"log_observation_sd[{i}]" for i in range(dim))
     return ("log_observation_sd",)
@@ -43,11 +44,7 @@ def default_observation_noise_prior(dim: int) -> GaussianPrior:
     different scale, state the scale instead with
     ``observation_noise_prior_from_scale``.
     """
-    return GaussianPrior(
-        [DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN] * dim,
-        [DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE] * dim,
-        names=_observation_noise_names(dim),
-    )
+    return GaussianPrior([DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN] * dim, [DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE] * dim, names=_observation_noise_names(dim))
 
 
 def robust_scale(y) -> float:
@@ -150,22 +147,27 @@ class ParameterLayout:
 
     @property
     def dim(self) -> int:
+        """Length of the full fitted vector."""
         return int(self.mean.size)
 
     @property
     def fixed_mask(self) -> np.ndarray:
+        """True for parameters pinned at their prior mean by a zero variance."""
         return np.isclose(np.diag(self.covariance), 0.0, atol=1e-14, rtol=0.0)
 
     @property
     def free_mask(self) -> np.ndarray:
+        """True for parameters the optimiser actually searches over."""
         return ~self.fixed_mask
 
     def unpack(self, parameters):
+        """Split a fitted vector into its four blocks, each possibly empty."""
         p = parameters
         return (p[self.theta_slice], p[self.phi_slice], p[self.process_noise_slice], p[self.observation_noise_slice])
 
 
 def _block_diag(blocks: list[np.ndarray]) -> np.ndarray:
+    """Assemble prior blocks into one block-diagonal covariance."""
     n = sum(b.shape[0] for b in blocks)
     out = np.zeros((n, n), dtype=float)
     start = 0

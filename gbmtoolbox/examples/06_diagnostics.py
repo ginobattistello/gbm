@@ -1,13 +1,14 @@
 """Tutorial 06 — convergence, curvature, information and AD identifiability."""
 
 import numpy as np
+
 from gbmtoolbox import (
     Config,
-    individual_fit,
     convergence_diagnostics,
+    individual_fit,
+    numerical_local_identifiability,
     posterior_hessian_diagnostics,
     prior_preconditioned_information,
-    numerical_local_identifiability,
 )
 from gbmtoolbox.examples.tutorial_models import binary_learning_model, simulate_binary_subject
 

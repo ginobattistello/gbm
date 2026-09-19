@@ -1,7 +1,8 @@
 """Tutorial 07 — prior and posterior predictive checks."""
 
 import numpy as np
-from gbmtoolbox import Config, individual_fit, prior_predictive, posterior_predictive
+
+from gbmtoolbox import Config, individual_fit, posterior_predictive, prior_predictive
 from gbmtoolbox.examples.tutorial_models import binary_learning_model, simulate_binary_subject
 
 rng = np.random.default_rng(42)

@@ -294,7 +294,7 @@ It is a **diagnostic**: it changes neither the fit nor its log-evidence, so
 model comparison is unaffected. The correction is evaluated once at the MAP
 rather than iterated to self-consistency, which removes most of the bias but
 leaves a little at the smallest trial counts. See
-`dev/09_observation_noise_correction.py` for the measured behaviour against the
+`dev/11_observation_noise_correction.py` for the measured behaviour against the
 analytic result for a linear model.
 
 ## MAP and Laplace inference

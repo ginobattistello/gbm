@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+
 from gbmtoolbox import GaussianPrior, Priors
 
 
@@ -8,7 +9,7 @@ def test_scalar_vector_matrix_covariance():
     np.testing.assert_allclose(p1.covariance, 2 * np.eye(2))
     p2 = GaussianPrior([0, 0], [1, 2])
     np.testing.assert_allclose(p2.covariance, np.diag([1, 2]))
-    p3 = GaussianPrior([0, 0], [[1, .2], [.2, 2]])
+    p3 = GaussianPrior([0, 0], [[1, 0.2], [0.2, 2]])
     assert p3.covariance.shape == (2, 2)
 
 
@@ -19,7 +20,7 @@ def test_zero_variance_fixes_parameter():
 
 def test_fixed_parameter_cannot_have_cross_covariance():
     with pytest.raises(ValueError, match="zero cross-covariance"):
-        GaussianPrior([0, 0], [[0, .1], [.1, 1]])
+        GaussianPrior([0, 0], [[0, 0.1], [0.1, 1]])
 
 
 def test_names_must_match_and_be_unique():

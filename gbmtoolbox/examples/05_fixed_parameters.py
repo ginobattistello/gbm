@@ -1,6 +1,7 @@
 """Tutorial 05 — fixing static parameters with zero prior variance."""
 
 import numpy as np
+
 from gbmtoolbox import Config, individual_fit
 from gbmtoolbox.examples.tutorial_models import binary_learning_model, simulate_binary_subject
 

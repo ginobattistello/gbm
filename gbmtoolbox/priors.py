@@ -9,6 +9,7 @@ import numpy as np
 
 
 def _as_mean(value) -> np.ndarray:
+    """Coerce a prior mean to a finite 1-D array, allowing an empty block."""
     arr = np.asarray(value, dtype=float).reshape(-1)
     # An empty mean is allowed: it declares a parameter block with no
     # parameters, which is how an observation-only model states that it has no
@@ -95,16 +96,18 @@ class GaussianPrior:
         object.__setattr__(self, "names", names)
 
     @classmethod
-    def empty(cls) -> "GaussianPrior":
+    def empty(cls) -> GaussianPrior:
         """A prior over no parameters, for a model with an empty block."""
         return cls([], [], names=())
 
     @property
     def dim(self) -> int:
+        """Number of parameters this prior covers."""
         return int(self.mean.size)
 
     @property
     def fixed_mask(self) -> np.ndarray:
+        """True where the marginal variance is zero, i.e. the parameter is fixed."""
         return np.isclose(np.diag(self.covariance), 0.0, atol=1e-14, rtol=0.0)
 
 
@@ -150,14 +153,17 @@ class Priors:
 
     @property
     def dim(self) -> int:
+        """Total number of static parameters across both blocks."""
         return self.evolution.dim + self.observation.dim
 
     @property
     def mean(self) -> np.ndarray:
+        """Stacked prior mean ``[theta, phi]``."""
         return np.concatenate([self.evolution.mean, self.observation.mean])
 
     @property
     def covariance(self) -> np.ndarray:
+        """Block-diagonal prior covariance over ``[theta, phi]``."""
         a = self.evolution.covariance
         b = self.observation.covariance
         out = np.zeros((self.dim, self.dim), dtype=float)
@@ -168,6 +174,7 @@ class Priors:
 
     @property
     def names(self) -> tuple[str, ...]:
+        """Parameter names in fitted order, rejecting duplicates across blocks."""
         en = self.evolution.names or tuple(f"theta[{i}]" for i in range(self.evolution.dim))
         on = self.observation.names or tuple(f"phi[{i}]" for i in range(self.observation.dim))
         names = tuple(en) + tuple(on)
@@ -177,8 +184,10 @@ class Priors:
 
     @property
     def theta_slice(self) -> slice:
+        """Where the evolution parameters sit in the stacked vector."""
         return slice(0, self.evolution.dim)
 
     @property
     def phi_slice(self) -> slice:
+        """Where the observation parameters sit in the stacked vector."""
         return slice(self.evolution.dim, self.dim)

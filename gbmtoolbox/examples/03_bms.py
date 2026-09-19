@@ -1,6 +1,9 @@
 """Tutorial 03 — random-effects Bayesian model selection."""
+
 import numpy as np
+
 from gbmtoolbox import bms
+
 rng = np.random.default_rng(42)
 lme = np.column_stack([rng.normal(-20, 2, 20), rng.normal(-23, 2, 20), rng.normal(-24, 2, 20)])
 result = bms(lme, n_samples=50_000, random_state=42)

@@ -16,14 +16,7 @@ Run it whenever you have few trials per subject, many free parameters, or both.
 
 import numpy as np
 
-from gbmtoolbox import (
-    Config,
-    GaussianPrior,
-    Priors,
-    StateModel,
-    individual_fit,
-    observation_noise_correction,
-)
+from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit, observation_noise_correction
 
 TRUE_SD = 1.0
 N_PARAMETERS = 5
@@ -37,11 +30,7 @@ def observation(x, phi, u_t):
 model = StateModel(
     observation=observation,
     family="gaussian",
-    priors=Priors(
-        observation=GaussianPrior(
-            [0.0] * N_PARAMETERS, [100.0] * N_PARAMETERS, names=[f"b{i}" for i in range(N_PARAMETERS)]
-        )
-    ),
+    priors=Priors(observation=GaussianPrior([0.0] * N_PARAMETERS, [100.0] * N_PARAMETERS, names=[f"b{i}" for i in range(N_PARAMETERS)])),
     initial_state=[0.0],
 )
 
@@ -58,10 +47,7 @@ for n_trials in (25, 50, 100, 400):
     fit = individual_fit([data], model, config=Config(num_init=3, random_state=0, display=False))
     correction = observation_noise_correction(fit)
 
-    print(
-        f"{n_trials:>8}{fit.output.observation_noise_sd[0, 0]:>14.4f}"
-        f"{correction.corrected_sd[0]:>15.4f}{correction.inflation_factor[0]:>12.3f}"
-    )
+    print(f"{n_trials:>8}{fit.output.observation_noise_sd[0, 0]:>14.4f}{correction.corrected_sd[0]:>15.4f}{correction.inflation_factor[0]:>12.3f}")
 
 print(
     "\nWith few trials the reported SD understates the observation noise, and the\n"

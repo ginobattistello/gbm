@@ -1,16 +1,20 @@
 """Compact text reporting."""
+
 from __future__ import annotations
 
 
 def fit_summary(result, subject: int = 0) -> str:
+    """One-screen text summary of a fitted subject.
+
+    Reports the fitted parameters, any estimated noise SDs, and whether the
+    Laplace approximation is usable, so a fit can be sanity-checked without
+    reaching into the result structure.
+    """
     p = result.output.parameters[subject]
     names = result.input.parameter_names
     diag = result.math.diagnostics[subject]
     rows = [f"GBM Toolbox fit · {result.input.model_name} · subject {subject}"]
-    rows.append(
-        f"family={result.input.family}  loglik={result.math.log_likelihood[subject]:.3f}  "
-        f"log-evidence={result.output.log_evidence[subject]:.3f}"
-    )
+    rows.append(f"family={result.input.family}  loglik={result.math.log_likelihood[subject]:.3f}  log-evidence={result.output.log_evidence[subject]:.3f}")
     rows.append("parameters: " + ", ".join(f"{n}={v:.4g}" for n, v in zip(names, p)))
     if result.output.process_noise_sd.shape[1]:
         rows.append("process SD: " + ", ".join(f"{x:.4g}" for x in result.output.process_noise_sd[subject]))

@@ -21,10 +21,7 @@ def binary_model():
         evolution=evolution,
         observation=observation,
         family="bernoulli",
-        priors=Priors(
-            GaussianPrior([0.0], [1.0], names=["alpha_raw"]),
-            GaussianPrior([1.0], [1.0], names=["log_beta"]),
-        ),
+        priors=Priors(GaussianPrior([0.0], [1.0], names=["alpha_raw"]), GaussianPrior([1.0], [1.0], names=["log_beta"])),
         initial_state=[0.5, 0.5],
         state_names=["Q0", "Q1"],
         name="binary_rw",
@@ -34,10 +31,7 @@ def binary_model():
 @pytest.fixture
 def binary_data():
     rng = np.random.default_rng(42)
-    return [{
-        "y": rng.integers(0, 2, 30),
-        "u": {"reward": rng.integers(0, 2, 30).astype(float)},
-    }]
+    return [{"y": rng.integers(0, 2, 30), "u": {"reward": rng.integers(0, 2, 30).astype(float)}}]
 
 
 @pytest.fixture
@@ -52,10 +46,7 @@ def gaussian_filter_model():
         evolution=evolution,
         observation=observation,
         family="gaussian",
-        priors=Priors(
-            GaussianPrior([0.8], [0.2], names=["a"]),
-            GaussianPrior([0.0], [1.0], names=["offset"]),
-        ),
+        priors=Priors(GaussianPrior([0.8], [0.2], names=["a"]), GaussianPrior([0.0], [1.0], names=["offset"])),
         initial_state=[0.0],
         initial_state_covariance=[1.0],
         process_covariance=[0.1],

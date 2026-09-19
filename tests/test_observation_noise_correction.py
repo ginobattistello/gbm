@@ -4,14 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from gbmtoolbox import (
-    Config,
-    GaussianPrior,
-    Priors,
-    StateModel,
-    individual_fit,
-    observation_noise_correction,
-)
+from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit, observation_noise_correction
 
 # A prior variance this wide is effectively flat, which isolates the
 # correction itself from prior shrinkage.
@@ -25,11 +18,7 @@ def _linear_model(n_params, prior_variance=100.0):
     return StateModel(
         observation=observation,
         family="gaussian",
-        priors=Priors(
-            observation=GaussianPrior(
-                [0.0] * n_params, [prior_variance] * n_params, names=[f"b{i}" for i in range(n_params)]
-            )
-        ),
+        priors=Priors(observation=GaussianPrior([0.0] * n_params, [prior_variance] * n_params, names=[f"b{i}" for i in range(n_params)])),
         initial_state=[0.0],
         observation_noise_prior=GaussianPrior([0.0], [FLAT], names=["log_observation_sd"]),
     )
@@ -127,10 +116,7 @@ def test_correction_applies_to_dynamical_models():
         evolution=lambda x, theta, u_t, y_t: jnp.asarray([theta[0] * x[0] + u_t]),
         observation=lambda x, phi, u_t: x[0] + phi[0],
         family="gaussian",
-        priors=Priors(
-            GaussianPrior([0.7], [0.5], names=["gain"]),
-            GaussianPrior([0.0], [1.0], names=["offset"]),
-        ),
+        priors=Priors(GaussianPrior([0.7], [0.5], names=["gain"]), GaussianPrior([0.0], [1.0], names=["offset"])),
         initial_state=[0.0],
         observation_noise_prior=GaussianPrior([0.0], [FLAT], names=["log_observation_sd"]),
     )
@@ -139,25 +125,20 @@ def test_correction_applies_to_dynamical_models():
     assert correction.corrected_sd[0] > correction.residual_sd[0]
 
 
-@pytest.mark.parametrize("family,observation,obs_dim,prior", [
-    ("bernoulli", lambda x, phi, u_t: phi[0] + phi[1] * u_t, None,
-     GaussianPrior([0.0, 0.0], [4.0, 4.0], names=["b0", "b1"])),
-    ("categorical", lambda x, phi, u_t: jnp.array([0.0, phi[0] + phi[1] * u_t]), 2,
-     GaussianPrior([0.0, 0.0], [4.0, 4.0], names=["a1", "b1"])),
-])
+@pytest.mark.parametrize(
+    "family,observation,obs_dim,prior",
+    [
+        ("bernoulli", lambda x, phi, u_t: phi[0] + phi[1] * u_t, None, GaussianPrior([0.0, 0.0], [4.0, 4.0], names=["b0", "b1"])),
+        ("categorical", lambda x, phi, u_t: jnp.array([0.0, phi[0] + phi[1] * u_t]), 2, GaussianPrior([0.0, 0.0], [4.0, 4.0], names=["a1", "b1"])),
+    ],
+)
 def test_non_gaussian_families_have_no_estimated_noise(family, observation, obs_dim, prior):
     rng = np.random.default_rng(4)
     n_trials = 50
     u = rng.normal(size=n_trials)
     y = (rng.random(n_trials) < 0.5).astype(int)
 
-    model = StateModel(
-        observation=observation,
-        family=family,
-        priors=Priors(observation=prior),
-        initial_state=[0.0],
-        observation_dim=obs_dim,
-    )
+    model = StateModel(observation=observation, family=family, priors=Priors(observation=prior), initial_state=[0.0], observation_dim=obs_dim)
     correction = observation_noise_correction(_fit({"y": y, "u": u}, model))
     assert not correction.valid
     assert correction.residual_sd.size == 0

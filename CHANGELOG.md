@@ -25,7 +25,7 @@
   about 10%. The Jacobian is differentiated through the model's own
   trajectory, so this covers dynamical models as well as static ones. It
   changes neither the fit nor its log-evidence. Validated against the analytic
-  result for a linear model in `dev/09_observation_noise_correction.py`.
+  result for a linear model in `dev/11_observation_noise_correction.py`.
 - `observation_noise_prior_from_scale(y_or_prior_scale, prior_sample_size=2.0)`,
   an opt-in observation-noise prior stated as an expected noise scale `s0` and
   a prior sample size `nu0`. It is the conjugate prior
@@ -67,12 +67,35 @@
 - Preflight error for a mismatched estimated-$R$ dimension now names the
   subject and the required `observation_dim`.
 
+### Documentation and housekeeping
+
+- Every function and class in the library now carries a docstring (161 of 161,
+  up from 32 of 123 public items), including the likelihood primitives in
+  `families.py` and the MAP/Laplace pipeline in `optimization.py`.
+- `docs/MANUAL.md` gains a section on models with no latent dynamics and on
+  `observation_noise_correction`, and its tutorial list now covers all ten.
+- `docs/VALIDATION.md` gains section 11 for the observation-noise correction,
+  so every reference script has a documented check.
+- Reference scripts in `dev/` are numbered consistently with the sections of
+  `docs/VALIDATION.md`; `validate_ad_derivatives.py` and
+  `validate_noise_recovery.py` became `08_ad_derivatives.py` and
+  `09_noise_recovery.py`, and the two newer checks moved to 10 and 11.
+- `gbmtoolbox/examples/` is a real package, so the tutorials keep working from
+  an installed wheel; `gbmtoolbox/dev/` is excluded from the wheel instead.
+- Removed a duplicated Jacobian helper in `diagnostics.py`: both
+  `numerical_local_identifiability` and `observation_noise_correction` now
+  share one documented `_free_prediction_function`.
+- Noise-prior tests moved out of `test_observation_only.py` into
+  `test_noise_priors.py`, so each file covers one topic.
+- Formatting and import order are enforced by `ruff`; the few deliberate lint
+  exceptions are listed with their reasons in `pyproject.toml`.
+
 ### Validation
 
-- `gbmtoolbox/dev/08_default_observation_noise.py`: validates the default
+- `gbmtoolbox/dev/10_default_observation_noise.py`: validates the default
   against the closed-form posterior mode (worst relative error `7.1e-09`) and
   quantifies prior shrinkage against the unpenalised MLE.
-- `gbmtoolbox/dev/09_observation_noise_correction.py`: checks the
+- `gbmtoolbox/dev/11_observation_noise_correction.py`: checks the
   parameter-uncertainty correction against the analytic maximum-likelihood
   bias for a linear model, with a tolerance in Monte-Carlo standard errors.
 

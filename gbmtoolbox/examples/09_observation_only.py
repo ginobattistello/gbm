@@ -20,14 +20,7 @@ This script also shows two things that are easy to get wrong:
 import jax.numpy as jnp
 import numpy as np
 
-from gbmtoolbox import (
-    Config,
-    GaussianPrior,
-    Priors,
-    StateModel,
-    individual_fit,
-    observation_noise_prior_from_scale,
-)
+from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit, observation_noise_prior_from_scale
 
 rng = np.random.default_rng(0)
 n_trials = 200

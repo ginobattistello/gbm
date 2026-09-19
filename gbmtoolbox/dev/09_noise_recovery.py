@@ -1,4 +1,5 @@
-"""Reference simulation for internally estimated diagonal Q and R."""
+"""Reference check 09: recovery of internally estimated diagonal Q and R."""
+
 import jax.numpy as jnp
 import numpy as np
 

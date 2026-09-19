@@ -1,4 +1,4 @@
-"""Default observation-noise prior: recovery against the analytic posterior mode.
+"""Reference check 10: default observation-noise prior against the analytic mode.
 
 Question.  When ``observation_covariance`` is omitted, the toolbox estimates a
 diagonal R under a default N(m0, v) prior on ``log_observation_sd`` (VBA's
@@ -27,10 +27,7 @@ import numpy as np
 from scipy.optimize import brentq
 
 from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit
-from gbmtoolbox.parameters import (
-    DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN,
-    DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE,
-)
+from gbmtoolbox.parameters import DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN, DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
 
 TRUE_MU = 1.25
 M0 = DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN
@@ -96,4 +93,4 @@ for true_sd, T, seed in [(0.3, 50, 5), (0.3, 200, 5), (0.3, 1000, 5)]:
     rng = np.random.default_rng(seed)
     y = TRUE_MU + rng.normal(scale=true_sd, size=T)
     reference, mle = analytic_posterior_sd(y, V, M0)
-    print(f"  T={T:>5d}  posterior sd={reference:.5f}  mle={mle:.5f}  shrinkage={100*(reference-mle)/mle:+.3f}%")
+    print(f"  T={T:>5d}  posterior sd={reference:.5f}  mle={mle:.5f}  shrinkage={100 * (reference - mle) / mle:+.3f}%")

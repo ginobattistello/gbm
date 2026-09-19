@@ -16,9 +16,11 @@ def _generalized_update(model, family, m_pred, P_pred, phi, rho_r, u_t, y_t, *, 
     eye = jnp.eye(n, dtype=m_pred.dtype)
 
     def terms(z):
+        """Score and Fisher information of the current state estimate."""
         x = m_pred + L @ z
 
         def obs_fn(xx):
+            """Observation predictor as a function of the latent state alone."""
             return jnp.atleast_1d(model.observation(xx, phi, u_t))
 
         eta = obs_fn(x)
@@ -34,6 +36,7 @@ def _generalized_update(model, family, m_pred, P_pred, phi, rho_r, u_t, y_t, *, 
         return x, eta, R, A, g
 
     def body(i, carry):
+        """One Fisher-scoring iteration of the local Laplace update."""
         z, converged, n_iter = carry
         _, _, _, A, g = terms(z)
         raw_step = solve_spd(A, g, jitter=jitter)
@@ -89,12 +92,14 @@ def nonlinear_state_filter_jax(
     P0 = model.initial_covariance_jax()
 
     def one_step(carry, y_t, u_t):
+        """Predict, then update, for a single trial."""
         m_pred, P_pred = carry
         m_filt, P_filt, ll, prediction, n_iter, converged = _generalized_update(
             model, family, m_pred, P_pred, phi, rho_r, u_t, y_t, max_iter=effective_max_iter, tol=update_tol, damping=damping, jitter=jitter
         )
 
         def transition(xx):
+            """Evolution map as a function of the latent state alone."""
             return jnp.asarray(model.evolution(xx, theta, u_t, y_t), dtype=jnp.float64).reshape(m_filt.shape)
 
         F = jax.jacfwd(transition)(m_filt)
@@ -107,12 +112,14 @@ def nonlinear_state_filter_jax(
     if u is None:
 
         def step(carry, y_t):
+            """scan body: run one trial of the filter."""
             return one_step(carry, y_t, None)
 
         _, outputs = jax.lax.scan(step, (m0, P0), y)
     else:
 
         def step(carry, inp):
+            """scan body: run one trial of the filter."""
             y_t, u_t = inp
             return one_step(carry, y_t, u_t)
 
@@ -138,6 +145,7 @@ def rts_smoother_jax(filtered_mean, filtered_covariance, predicted_mean, predict
         return filtered_mean, filtered_covariance
 
     def step(carry, inp):
+        """scan body: run one trial of the filter."""
         m_next_s, P_next_s = carry
         m, P, mp_next, Pp_next, F = inp
         G = solve_spd(Pp_next, F @ P, jitter=jitter).T

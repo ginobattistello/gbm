@@ -2,8 +2,9 @@
 
 import matplotlib.pyplot as plt
 import numpy as np
-from gbmtoolbox.examples.tutorial_models import continuous_model, simulate_continuous_subject
+
 from gbmtoolbox import Config, individual_fit
+from gbmtoolbox.examples.tutorial_models import continuous_model, simulate_continuous_subject
 
 rng = np.random.default_rng(42)
 n_subjects, n_trials = 30, 80

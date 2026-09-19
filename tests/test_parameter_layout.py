@@ -1,13 +1,16 @@
-import numpy as np
-from gbmtoolbox import GaussianPrior, Priors, StateModel
 import jax.numpy as jnp
+import numpy as np
+
+from gbmtoolbox import GaussianPrior, Priors, StateModel
 
 
 def test_diagonal_noise_layout_broadcasts_scalar_priors():
     def evolution(x, theta, u_t, y_t):
         return x
+
     def observation(x, phi, u_t):
         return jnp.asarray([x[0] + phi[0]])
+
     model = StateModel(
         evolution=evolution,
         observation=observation,

@@ -11,6 +11,13 @@ from .individual_fit import individual_fit
 
 @dataclass
 class PriorSensitivityResult:
+    """Posterior moments obtained under each prior in a sensitivity sweep.
+
+    Entry ``i`` of every list corresponds to the same entry of the
+    ``priors_list`` passed to :func:`prior_sensitivity`, so the lists can be
+    read together to see how far the posterior moves with the prior.
+    """
+
     prior_means: list[np.ndarray]
     prior_covariances: list[np.ndarray]
     posterior_means: list[np.ndarray]

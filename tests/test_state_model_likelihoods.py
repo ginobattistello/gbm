@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import numpy as np
+
 from gbmtoolbox import GaussianPrior, Priors, StateModel
 
 
@@ -14,12 +15,12 @@ def test_bernoulli_likelihood_matches_formula():
         initial_state=[0],
     )
     out = model.evaluate([0, 0], {"y": np.array([1, 0]), "u": None})
-    np.testing.assert_allclose(out["loglik"], [np.log(.8), np.log(.2)], rtol=1e-10)
+    np.testing.assert_allclose(out["loglik"], [np.log(0.8), np.log(0.2)], rtol=1e-10)
 
 
 def test_categorical_likelihood_matches_formula():
     # Logits: softmax(log p) recovers p up to an additive constant.
-    logits = jnp.asarray(np.log([.2, .3, .5]))
+    logits = jnp.asarray(np.log([0.2, 0.3, 0.5]))
     model = StateModel(
         evolution=lambda x, th, u, y: x,
         observation=lambda x, ph, u: logits,
@@ -28,7 +29,7 @@ def test_categorical_likelihood_matches_formula():
         initial_state=[0],
     )
     out = model.evaluate([0, 0], {"y": np.array([2, 1]), "u": None})
-    np.testing.assert_allclose(out["loglik"], [np.log(.5), np.log(.3)], rtol=1e-10)
+    np.testing.assert_allclose(out["loglik"], [np.log(0.5), np.log(0.3)], rtol=1e-10)
 
 
 def test_gaussian_likelihood_matches_formula():
@@ -53,14 +54,12 @@ def test_generic_u_dictionary_is_sliced_without_reserved_names():
     shows which slice each trial received. The JAX backend requires numeric or
     bool fields, so a categorical condition is a numeric code, not a string.
     """
+
     def evo(x, th, u, y):
         # Carry the current trial's input forward so it is observable in states.
         return jnp.asarray([u["abc"] + 0.0 * u["condition"]])
 
-    model = StateModel(
-        evo, lambda x, ph, u: 0.0, "bernoulli",
-        Priors(GaussianPrior([0], [0]), GaussianPrior([0], [0])), [0]
-    )
+    model = StateModel(evo, lambda x, ph, u: 0.0, "bernoulli", Priors(GaussianPrior([0], [0]), GaussianPrior([0], [0])), [0])
     out = model.evaluate([0, 0], {"y": np.array([0, 1]), "u": {"abc": np.array([3.0, 4.0]), "condition": np.array([1.0, 1.0])}})
     # states[t] is the state entering trial t: initial_state, then the value
     # evolution built from trial 0's slice of u["abc"].

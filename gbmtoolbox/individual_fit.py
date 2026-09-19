@@ -8,20 +8,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 
 from .optimization import Config, OptimizationDiagnostics, OptimizationResult, optimize_map
-from .validation import validate_fit_spec
-
-import jax
-import jax.numpy as jnp
-
 from .state_model import prepare_subject_data
+from .validation import validate_fit_spec
 
 _PROPAGATION_CACHE = {}
 
 
 def _compiled_propagation(model, config):
+    """Cache the JAX function that reruns the model at posterior draws."""
     key = (id(model), int(config.filter_max_iter), float(config.filter_tol), float(config.filter_damping), float(config.filter_jitter))
 
     cached = _PROPAGATION_CACHE.get(key)
@@ -29,6 +28,7 @@ def _compiled_propagation(model, config):
         return cached
 
     def one_draw(parameters, prepared_data):
+        """Re-run the model at one posterior draw of the static parameters."""
         run = model.evaluate_jax(
             parameters,
             prepared_data,
@@ -47,6 +47,12 @@ def _compiled_propagation(model, config):
 
 @dataclass
 class FitInput:
+    """What was fitted: model identity, parameter layout and the prior.
+
+    Recorded so a result can be interpreted, and re-checked, without the model
+    object that produced it.
+    """
+
     model_name: str
     family: str
     parameter_names: tuple[str, ...]
@@ -61,6 +67,15 @@ class FitInput:
 
 @dataclass
 class FitOutput:
+    """The estimates, one row per subject.
+
+    ``parameters`` is the full fitted vector; the ``*_parameters`` fields are
+    views of its blocks, and the ``*_sd`` fields are the noise parameters
+    exponentiated back to standard deviations. ``prediction`` holds trial-wise
+    expected outcomes -- probabilities for Bernoulli and categorical families,
+    not logits.
+    """
+
     parameters: np.ndarray
     evolution_parameters: np.ndarray
     observation_parameters: np.ndarray
@@ -75,6 +90,13 @@ class FitOutput:
 
 @dataclass
 class FitMath:
+    """Quantities behind the estimates: densities, curvature and diagnostics.
+
+    ``hessian`` and ``covariance`` live in each subject's free space, selected
+    by ``free_mask``; ``covariance`` is ``None`` where the Laplace
+    approximation was rejected.
+    """
+
     log_likelihood: np.ndarray
     log_prior: np.ndarray
     log_joint: np.ndarray
@@ -86,12 +108,23 @@ class FitMath:
 
 @dataclass
 class FitProfile:
+    """When the fit ran and under which configuration."""
+
     datetime: str
     config: Config
 
 
 @dataclass
 class FitResult:
+    """Everything one call to :func:`individual_fit` produced.
+
+    Split four ways so each part can be read on its own: ``input`` is what was
+    asked for, ``output`` the estimates, ``math`` the quantities behind them,
+    and ``profile`` the run's provenance. The model and data are kept too, so
+    diagnostics can re-evaluate the fit without them being passed around
+    separately.
+    """
+
     input: FitInput
     output: FitOutput
     math: FitMath
@@ -101,11 +134,13 @@ class FitResult:
     method: str = "MAP/Laplace"
 
     def plot(self, subject: int = 0, **kwargs):
+        """Plot one subject's fit; see :func:`gbmtoolbox.display.plot_subject`."""
         from .display import plot_subject
 
         return plot_subject(self, subject=subject, **kwargs)
 
     def summary(self, subject: int = 0) -> str:
+        """One-screen text summary of one subject's fit."""
         from .reporting import fit_summary
 
         return fit_summary(self, subject=subject)
@@ -115,6 +150,7 @@ class FitResult:
 
 
 def _full_covariance(opt: OptimizationResult, n_params: int) -> np.ndarray | None:
+    """Embed a free-space covariance back into the full parameter vector."""
     if opt.covariance is None:
         return None
     full = np.zeros((n_params, n_params), dtype=float)
@@ -124,6 +160,7 @@ def _full_covariance(opt: OptimizationResult, n_params: int) -> np.ndarray | Non
 
 
 def _latent_none(run, model):
+    """Latent states with no uncertainty attached."""
     mean = np.asarray(run["states"], dtype=float)
     return {
         "state": {
@@ -142,6 +179,7 @@ def _latent_none(run, model):
 
 
 def _latent_filtered(run, model):
+    """Latent states with the filter's own conditional uncertainty."""
     mean = np.asarray(run["states"], dtype=float)
     cov = np.asarray(run["state_covariance"], dtype=float)
     sd = np.sqrt(np.maximum(np.diagonal(cov, axis1=1, axis2=2), 0.0))
@@ -162,6 +200,7 @@ def _latent_filtered(run, model):
 
 
 def _sample_static_posterior(opt: OptimizationResult, model, n_samples: int, rng):
+    """Draw static parameters from the Laplace posterior."""
     if not opt.diagnostics.laplace_valid or opt.covariance is None:
         raise ValueError("propagated latent uncertainty requires a valid Laplace posterior")
     free_draws = rng.multivariate_normal(opt.free_parameters, opt.covariance, size=n_samples)
@@ -171,6 +210,7 @@ def _sample_static_posterior(opt: OptimizationResult, model, n_samples: int, rng
 
 
 def _latent_propagated(opt, model, subject_data, config, rng):
+    """Latent uncertainty from rerunning the model at posterior draws."""
     if not opt.diagnostics.laplace_valid:
         warnings.warn(
             "Laplace posterior is invalid; propagated latent uncertainty is unavailable. The MAP latent trajectory is retained without a shadow.",

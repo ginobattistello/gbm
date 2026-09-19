@@ -10,6 +10,15 @@ from scipy.special import expit, gammaln, psi
 
 @dataclass
 class BMSResult:
+    """Random-effects model comparison over a subjects-by-models evidence matrix.
+
+    ``exceedance_prob`` is the probability that a model is the most frequent in
+    the group. ``bor`` is the Bayesian omnibus risk -- the posterior
+    probability that the models are in fact equally frequent -- and
+    ``protected_exceedance_prob`` folds that risk in, so it is the safer of the
+    two to report.
+    """
+
     posterior_parameters: np.ndarray
     model_frequency: np.ndarray
     exceedance_prob: np.ndarray
@@ -19,6 +28,11 @@ class BMSResult:
 
 
 def dirichlet_exceedance(alpha, n_samples=100000, random_state=42):
+    """Exceedance probabilities of a Dirichlet, by Monte-Carlo sampling.
+
+    Drawn in blocks so the sample count can be large without holding every
+    draw in memory at once.
+    """
     alpha = np.asarray(alpha, dtype=float).reshape(-1)
     if np.any(alpha <= 0):
         raise ValueError("Dirichlet parameters must be positive")
@@ -47,6 +61,7 @@ def _compute_fe(L, alpha, r, alpha0):
 
 
 def _null_fe(L):
+    """Free energy of the null model, in which all models are equally frequent."""
     K, N = L.shape
     F0 = 0.0
     for i in range(N):
@@ -68,7 +83,7 @@ def bms(lme, *, alpha0: np.ndarray | None = None, n_samples=100000, random_state
     lme = np.asarray(lme, dtype=float)
     if lme.ndim != 2 or not np.all(np.isfinite(lme)):
         raise ValueError("lme must be a finite subjects x models matrix")
-    N, K = lme.shape
+    _, K = lme.shape  # subjects x models
     if K < 2:
         raise ValueError("BMS requires at least two models")
     alpha0 = np.ones(K) if alpha0 is None else np.asarray(alpha0, dtype=float).reshape(-1)

@@ -85,6 +85,8 @@ class Config:
 
 @dataclass
 class StartRecord:
+    """Outcome of one L-BFGS-B start, kept so restarts can be compared."""
+
     initial_parameters: np.ndarray
     final_parameters: np.ndarray
     log_joint: float
@@ -97,6 +99,15 @@ class StartRecord:
 
 @dataclass
 class OptimizationDiagnostics:
+    """Everything recorded about a fit other than the estimate itself.
+
+    Covers the multi-start search (``starts``, ``search_path``), the winning
+    optimiser run (``lbfgsb_*``, ``abs_grad``) and the separately recomputed
+    observed Hessian (``hess_*``, ``laplace_*``). ``laplace_valid`` is false
+    when that Hessian is not positive definite, which is reported rather than
+    repaired: a good MAP can coexist with an unusable Laplace approximation.
+    """
+
     starts: list[StartRecord] = field(default_factory=list)
     search_path: np.ndarray | None = None
     search_log_joint: np.ndarray | None = None
@@ -117,6 +128,14 @@ class OptimizationDiagnostics:
 
 @dataclass
 class OptimizationResult:
+    """MAP estimate for one subject plus its Laplace quantities.
+
+    ``parameters`` is the full vector including any fixed entries, while
+    ``free_parameters``, ``hessian`` and ``covariance`` live in the reduced
+    free space picked out by ``free_mask``. ``covariance`` and ``log_evidence``
+    are ``None``/``nan`` when the observed Hessian is not positive definite.
+    """
+
     parameters: np.ndarray
     free_parameters: np.ndarray
     log_likelihood: float
@@ -130,6 +149,7 @@ class OptimizationResult:
 
 
 def _free_space(layout):
+    """Reduce the prior to the free parameters the optimiser searches."""
     mean = np.asarray(layout.mean, dtype=float)
     covariance = np.asarray(layout.covariance, dtype=float)
     fixed_mask = np.isclose(np.diag(covariance), 0.0, atol=1e-14, rtol=0.0)
@@ -152,6 +172,7 @@ def _free_space(layout):
 
 
 def _reconstruct_host(free_values, mean, free_mask):
+    """Put free-parameter values back into the full vector."""
     full = mean.copy()
     full[free_mask] = np.asarray(free_values, dtype=float)
     return full
@@ -175,6 +196,7 @@ def _resolved_hard_bounds(config: Config, model):
 
 
 def _free_bounds(resolved_bounds, free_mask):
+    """Restrict hard bounds to the free parameters, in their order."""
     if resolved_bounds is None:
         return None
     out = []
@@ -232,6 +254,7 @@ def _compiled_objective_functions(model, free_idx, config):
     free_idx_j = jnp.asarray(free_idx, dtype=jnp.int32)
 
     def components(x, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data):
+        """Log-likelihood and log-prior at one free-parameter vector."""
         # Reconstruct full parameter vector.
         full = full_prior_mean.at[free_idx_j].set(x)
         run = model.evaluate_jax(
@@ -250,6 +273,7 @@ def _compiled_objective_functions(model, free_idx, config):
         return loglik, logprior
 
     def negative_log_joint(x, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data):
+        """Objective minimised by L-BFGS-B: minus the log joint."""
         loglik, logprior = components(x, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data)
         return -(loglik + logprior)
 
@@ -303,7 +327,24 @@ def central_hessian(func, x, relative_step=1e-4):
 
 
 def optimize_map(subject_data, model, config: Config, *, rng=None) -> OptimizationResult:
-    """Fit one subject using multi-start L-BFGS-B with exact JAX gradients."""
+    """Fit one subject: multi-start MAP, then an independent Laplace step.
+
+    The pipeline is deliberately two-stage::
+
+        multi-start L-BFGS-B  ->  MAP  ->  observed Hessian  ->  covariance, evidence
+
+    The quasi-Newton curvature that L-BFGS-B builds up while searching is
+    *never* reused for the Laplace approximation. The Hessian is recomputed
+    from scratch at the MAP, by automatic differentiation of the same objective
+    the optimiser minimised, and it is not repaired by clipping eigenvalues.
+    A valid MAP can therefore come back with ``laplace_valid=False``, which is
+    reported rather than hidden.
+
+    Parameters fixed by a zero prior variance are removed from the search
+    entirely: the optimiser works in the reduced free space and the full vector
+    is reassembled afterwards. A model with no free parameters at all is scored
+    at its prior mean without optimising.
+    """
     from .state_model import prepare_subject_data
 
     if rng is None:
@@ -328,15 +369,19 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
     compiled_hessian = compiled["hessian"]
 
     def components_jax(x):
+        """Log-likelihood and log-prior at ``x``, with this subject's data bound."""
         return compiled_components(x, mean_j, free_mean_j, precision_j, logdet_covariance_j, prepared)
 
     def objective_jax(x):
+        """Negative log joint at ``x``."""
         return compiled_value(x, mean_j, free_mean_j, precision_j, logdet_covariance_j, prepared)
 
     def objective_value_and_grad_jax(x):
+        """Negative log joint and its exact gradient at ``x``."""
         return compiled_value_and_grad(x, mean_j, free_mean_j, precision_j, logdet_covariance_j, prepared)
 
     def objective_hessian_jax(x):
+        """Observed Hessian of the negative log joint at ``x``."""
         return compiled_hessian(x, mean_j, free_mean_j, precision_j, logdet_covariance_j, prepared)
 
     if d == 0:
@@ -360,6 +405,12 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
     invalid_count = 0
 
     def scipy_fun(x):
+        """Value and gradient for SciPy, counting non-finite evaluations.
+
+        A non-finite objective is reported back as a large finite penalty with
+        a zero gradient, so one bad region cannot abort the whole search; the
+        occurrences are counted in ``n_invalid_evaluations`` instead.
+        """
         nonlocal invalid_count
         x_jax = jnp.asarray(x, dtype=jnp.float64)
         value, grad = objective_value_and_grad_jax(x_jax)
@@ -384,6 +435,9 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
         path = [np.asarray(init, dtype=float).copy()]
 
         def callback(xk):
+            """Record the search path for this start."""
+            # `path` is rebound each iteration and L-BFGS-B calls this
+            # synchronously, so the closure always appends to the current start.
             path.append(np.asarray(xk, dtype=float).copy())
 
         res = minimize(scipy_fun, init, method="L-BFGS-B", jac=True, bounds=bounds, callback=callback, options={"maxiter": config.maxiter})

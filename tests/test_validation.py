@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
 from gbmtoolbox import Config, GaussianPrior, Priors, StateModel
 from gbmtoolbox.validation import validate_fit_spec
 
@@ -34,6 +35,7 @@ def test_filtered_rejected_for_deterministic_jax_model():
     """Regression: a deterministic model yields an identically zero state
     covariance, which would otherwise be reported as genuine filtered
     uncertainty (sd=0 at every trial, labelled uncertainty_type='filtered')."""
+
     def evolution(x, theta, u_t, y_t):
         alpha = 1.0 / (1.0 + jnp.exp(-theta[0]))
         choice = y_t.astype(jnp.int32)
@@ -60,6 +62,7 @@ def test_filtered_rejected_for_deterministic_jax_model():
 def test_rejects_nondeterministic_evolution():
     """A host-side RNG inside evolution is traced once and silently frozen into
     the compiled graph, so it must be rejected before tracing."""
+
     def evolution(x, theta, u_t, y_t):
         alpha = 1.0 / (1.0 + jnp.exp(-theta[0]))
         choice = y_t.astype(jnp.int32)
@@ -83,6 +86,6 @@ def test_rejects_nondeterministic_evolution():
 
 
 def test_latent_sampling_settings_discarded_when_not_propagated():
-    cfg = Config(latent_uncertainty="none", latent_samples=55, latent_interval=.8)
+    cfg = Config(latent_uncertainty="none", latent_samples=55, latent_interval=0.8)
     assert cfg.latent_samples is None
     assert cfg.latent_interval is None

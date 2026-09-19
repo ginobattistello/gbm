@@ -47,6 +47,10 @@ Issues = "https://github.com/ginobattistello/BayesGBM/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["gbmtoolbox*"]
+# dev/ holds method-validation scripts for contributors and CI. They are kept
+# in the repository but excluded from the wheel, so an install ships only the
+# library and its runnable tutorials.
+exclude = ["gbmtoolbox.dev*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -57,3 +61,23 @@ line-length = 160
 
 [tool.ruff.format]
 skip-magic-trailing-comma = true
+
+[tool.ruff.lint]
+# Kept deliberately:
+#   B023  a loop-local list captured by an L-BFGS-B callback that SciPy calls
+#         synchronously, so the closure always sees the intended list;
+#   DTZ005 fit timestamps are local wall-clock provenance, not instants to
+#         compare across machines;
+#   C408  tuple() reads better than a bare () when returning an empty result.
+ignore = ["B023", "DTZ005", "C408"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tutorials and reference checks are numbered so they read in order. They are
+# run as scripts, never imported, so the module-name rule does not apply.
+"gbmtoolbox/examples/*.py" = ["N999"]
+"gbmtoolbox/dev/*.py" = ["N999"]
+
+[tool.ruff.lint.isort]
+# Match the formatter's skip-magic-trailing-comma, so the two do not disagree
+# about when an import list should be split over several lines.
+split-on-trailing-comma = false

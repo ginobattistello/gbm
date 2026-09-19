@@ -1,6 +1,7 @@
 """Tutorial 04 — hierarchical theta/phi refitting; Q/R priors remain model-level."""
 
 import numpy as np
+
 from gbmtoolbox import Config, HBIConfig, hbi_main
 from gbmtoolbox.examples.tutorial_models import binary_learning_model, simulate_binary_subject
 

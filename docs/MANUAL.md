@@ -139,6 +139,30 @@ rate as `jax.nn.sigmoid(theta[0])`, a positive scale as `jnp.exp(phi[0])`. Name
 the raw parameter for what it is (`alpha_raw`, `log_beta`) so output stays
 readable.
 
+## Models with no latent dynamics
+
+Not every model has a state that evolves. When the outcome on each trial
+depends only on that trial's inputs -- a psychometric function, a regression on
+stimulus features -- omit the evolution function and the evolution prior:
+
+```python
+model = StateModel(
+    observation=lambda x, phi, u_t: phi[0] + phi[1] * u_t,
+    family="gaussian",
+    priors=Priors(observation=GaussianPrior([0.0, 0.0], [1.0, 1.0], names=["b0", "b1"])),
+)
+```
+
+$\theta$ is then an empty vector and only the observation parameters are
+estimated. `initial_state` may be omitted too: it defaults to `[0.0]`, and
+with no evolution the state never changes, so an observation function that
+ignores $x$ gives the same fit whatever it holds. The state is still carried
+because the trial recursion needs something to thread through; set it only when
+the observation function actually reads $x$.
+
+Declaring an evolution prior without an evolution function is an error, since
+that would announce parameters nothing can use.
+
 ## Static and dynamic models
 
 A model is **static** — better, deterministic — when the latent state follows
@@ -334,6 +358,15 @@ that is not determined — a property of your model, visible before you
 over-interpret an estimate. It is a numerical check at the fitted point, not a
 proof of global identifiability.
 
+For Gaussian models, `observation_noise_correction` asks whether the reported
+observation SD can be trusted. That SD comes from the residuals at the fitted
+parameters, which treats them as known exactly, so a model with enough freedom
+relative to the number of trials leaves residuals that understate the noise --
+the familiar gap between $SSE/T$ and $SSE/(T-p)$. The diagnostic recomputes the
+noise from the expected residual energy under the Laplace posterior and reports
+an inflation factor; near 1 the reported SD is fine, at 1.1 or above it is not.
+It changes neither the fit nor its evidence.
+
 Also available: `prior_sensitivity`, to see how much conclusions depend on prior
 choices, and `prior_predictive` / `posterior_predictive`, to check that the
 model generates data resembling what was observed.
@@ -421,6 +454,8 @@ Runnable, commented examples in `gbmtoolbox/examples/`:
 6. `06_diagnostics.py` — convergence, Hessian, information, identifiability
 7. `07_predictive_checks.py` — prior and posterior predictive checks
 8. `08_filtered_state_model.py` — latent uncertainty from filtering
+9. `09_observation_only.py` — models with no latent dynamics, all three families
+10. `10_observation_noise_correction.py` — is the reported observation noise trustworthy?
 
 ## References
 

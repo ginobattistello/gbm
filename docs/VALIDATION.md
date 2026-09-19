@@ -29,7 +29,7 @@ for f in gbmtoolbox/dev/*.py; do python "$f"; done   # scientific layer
 | SciPy | 1.17.1 |
 | JAX / jaxlib | 0.11.0 |
 | Platform | Darwin arm64 |
-| Date | 2026-09-16 |
+| Date | 2026-09-19 |
 
 **Automated suite: 51 passed, 0 failed. Reference scripts: 10 of 10 pass.**
 
@@ -190,7 +190,7 @@ It is not a proof of global structural identifiability.
 
 ## 8. Automatic differentiation against finite differences
 
-`validate_ad_derivatives.py`
+`08_ad_derivatives.py`
 
 **Question.** The default Hessian is computed by automatic differentiation. Does
 it agree with the central finite-difference Hessian it replaced?
@@ -203,7 +203,7 @@ disagreement between the two methods.
 
 ## 9. Noise-parameter recovery
 
-`validate_noise_recovery.py`
+`09_noise_recovery.py`
 
 **Question.** When process and observation noise are estimated rather than
 fixed, are they recovered, and does the posterior reflect their joint curvature?
@@ -241,6 +241,37 @@ $\sigma \in [0.3, 2.5]$ and $T \in [200, 800]$ — the estimator reproduces the
 analytic posterior mode. Shrinkage against the unpenalised MLE is `+3.95%` at
 $T = 50$, `+0.94%` at $T = 200$ and `+0.18%` at $T = 1000$: the default prior
 is weakly informative and its influence vanishes with data.
+
+---
+
+## 11. Observation-noise correction for parameter uncertainty
+
+`11_observation_noise_correction.py`
+
+**Question.** The estimated observation SD is driven by the residuals at the
+fitted parameters, which treats those parameters as known exactly. Does that
+reproduce the biased maximum-likelihood variance, and does correcting the
+residual energy with the prediction uncertainty
+$\sum_t J_t \Sigma J_t^\top$ remove the bias?
+
+**Reference.** For a linear model with $p$ parameters the maximum-likelihood
+estimator $\sqrt{SSE/T}$ is biased low by exactly $\sqrt{(T-p)/T}$, and
+$\sum_t J_t \Sigma J_t^\top = \sigma^2 p$, so the corrected estimate is the
+unbiased $SSE/(T-p)$. Both are known in closed form.
+
+**Criterion.** The tolerance is expressed in Monte-Carlo standard errors, not
+in absolute SD units. The estimator has standard error
+$\sigma / \sqrt{2(T-p)N}$ over $N$ replicates — about `0.02` at $T = 25$,
+$p = 5$, $N = 60$ — so any absolute tolerance tight enough to be meaningful at
+$T = 200$ would sit below the noise floor at $T = 25$ and fail at random.
+A deviation above `4` standard errors fails.
+
+**Result.** Across $T \in \{25, 50, 100, 200\}$ and $p \in \{3, 5\}$, the
+uncorrected estimate reproduces the analytic maximum-likelihood bias to within
+`1.77` standard errors, and the corrected estimate matches the true SD to
+within `2.37`. The correction is applied once at the MAP rather than iterated
+to self-consistency, so a small downward bias survives at the smallest trial
+counts and shrinks as $T$ grows.
 
 ---
 

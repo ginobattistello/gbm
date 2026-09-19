@@ -13,6 +13,14 @@ from .state_model import prepare_subject_data
 
 @dataclass
 class ConvergenceSummary:
+    """Whether the multi-start search agreed on a single solution.
+
+    ``same_solution`` is the headline: it is true only when every start reached
+    the same log joint *and* landed in the same place, so a high
+    ``agreement_fraction`` with ``same_solution=False`` means the objective has
+    a plateau or several comparable optima.
+    """
+
     n_starts: int
     n_successful: int
     n_objective_agreeing: int
@@ -28,6 +36,13 @@ class ConvergenceSummary:
 
 @dataclass
 class HessianDiagnostics:
+    """Spectrum of the observed Hessian and the posterior it implies.
+
+    ``posterior_sd`` and ``posterior_correlation`` are ``None`` when the
+    Hessian is not positive definite, i.e. when the Laplace approximation does
+    not exist.
+    """
+
     eigenvalues: np.ndarray
     eigenvectors: np.ndarray
     condition_number: float
@@ -39,6 +54,14 @@ class HessianDiagnostics:
 
 @dataclass
 class DataInformationSpectrum:
+    """How much the data adds to the prior, direction by direction.
+
+    Eigenvalues are of the prior-preconditioned likelihood information, so they
+    are unit-free: ``data_informed`` marks directions where the data carries
+    more information than the prior. Negative values mean the objective curves
+    the wrong way there.
+    """
+
     eigenvalues: np.ndarray
     eigenvectors: np.ndarray
     parameter_names: tuple[str, ...]
@@ -48,6 +71,13 @@ class DataInformationSpectrum:
 
 @dataclass
 class LocalIdentifiability:
+    """Rank of the prediction Jacobian at the MAP.
+
+    A ``nullity`` above zero means some combination of parameters leaves every
+    prediction unchanged, so the data cannot distinguish it;
+    ``parameter_directions`` says which combination.
+    """
+
     singular_values: np.ndarray
     rank: int
     nullity: int
@@ -82,11 +112,23 @@ class ObservationNoiseCorrection:
 
 @dataclass
 class NoiseCorrelationSummary:
+    """Posterior correlations involving the estimated noise parameters.
+
+    Strong correlation between a noise SD and a model parameter means the two
+    are trading off, and neither is pinned down on its own.
+    """
+
     parameter_names: tuple[str, ...]
     correlation: np.ndarray | None
 
 
 def convergence_diagnostics(fit, subject: int = 0, *, objective_tol=1e-4, parameter_tol=1e-3) -> ConvergenceSummary:
+    """Compare the multi-start restarts for one subject.
+
+    Two starts count as the same solution when their log joints agree to
+    ``objective_tol`` and their endpoints to ``parameter_tol``, both relative
+    to the scale of the quantity being compared.
+    """
     diag = fit.math.diagnostics[subject]
     starts = list(diag.starts)
     if not starts:
@@ -130,6 +172,7 @@ def convergence_diagnostics(fit, subject: int = 0, *, objective_tol=1e-4, parame
 
 
 def posterior_hessian_diagnostics(fit, subject: int = 0) -> HessianDiagnostics:
+    """Eigen-decompose the observed Hessian and report the Laplace posterior."""
     H = np.asarray(fit.math.hessian[subject], dtype=float)
     if H.size == 0:
         return HessianDiagnostics(
@@ -165,6 +208,13 @@ def posterior_hessian_diagnostics(fit, subject: int = 0) -> HessianDiagnostics:
 
 
 def prior_preconditioned_information(fit, subject: int = 0) -> DataInformationSpectrum:
+    """Spectrum of the likelihood information measured in prior units.
+
+    The likelihood information is recovered as ``H_post - prior precision`` and
+    then whitened by the prior covariance, which makes its eigenvalues
+    comparable across parameters on different scales: an eigenvalue above 1 is
+    a direction the data constrains more tightly than the prior does.
+    """
     free = fit.math.free_mask[subject]
     Hpost = np.asarray(fit.math.hessian[subject], dtype=float)
     Sigma0 = fit.input.prior_covariance[np.ix_(free, free)]
@@ -184,18 +234,28 @@ def prior_preconditioned_information(fit, subject: int = 0) -> DataInformationSp
     )
 
 
-def numerical_local_identifiability(fit, subject: int = 0, *, rank_tol=None) -> LocalIdentifiability:
-    """Local prediction identifiability using an exact JAX Jacobian."""
-    p0 = np.asarray(fit.output.parameters[subject], dtype=float)
+def _free_prediction_function(fit, subject: int):
+    """Build ``predictions(x_free) -> (T, d)`` and the pieces it needs.
+
+    Several diagnostics differentiate the model's own trial-wise predictions
+    with respect to the *free* parameters.  This returns that function together
+    with the free-parameter indices and the MAP point in that reduced space, so
+    each caller only has to say what it wants done with the Jacobian.
+
+    The predictions come from ``model.evaluate_jax``, so differentiating them
+    propagates through the latent trajectory exactly as the likelihood does and
+    dynamical models need no special handling.
+    """
+    parameters = jnp.asarray(np.asarray(fit.output.parameters[subject], dtype=float))
     free = np.asarray(fit.math.free_mask[subject], dtype=bool)
     idx = np.flatnonzero(free)
+    idx_j = jnp.asarray(idx, dtype=jnp.int32)
     prepared = prepare_subject_data(fit.data[subject])
     config = fit.profile.config
-    p0_j = jnp.asarray(p0)
-    idx_j = jnp.asarray(idx, dtype=jnp.int32)
 
-    def predictions_from_free(x):
-        full = p0_j.at[idx_j].set(x)
+    def predictions(x_free):
+        """Trial-wise predictions as ``(T, d)``, with fixed parameters held."""
+        full = parameters.at[idx_j].set(x_free)
         out = fit.model.evaluate_jax(
             full,
             prepared,
@@ -204,15 +264,27 @@ def numerical_local_identifiability(fit, subject: int = 0, *, rank_tol=None) -> 
             filter_damping=config.filter_damping,
             filter_jitter=config.filter_jitter,
         )
-        p = out["prediction"]
+        prediction = out["prediction"]
+        return prediction.reshape(prediction.shape[0], -1)
+
+    return predictions, idx, parameters[idx_j]
+
+
+def numerical_local_identifiability(fit, subject: int = 0, *, rank_tol=None) -> LocalIdentifiability:
+    """Local prediction identifiability using an exact JAX Jacobian."""
+    predictions, idx, x0 = _free_prediction_function(fit, subject)
+
+    def flat_predictions(x_free):
+        """Predictions flattened to one vector, for a single Jacobian."""
+        p = predictions(x_free)
         if fit.model.family == "categorical":
-            p = p[:, :-1]  # remove simplex redundancy
+            p = p[:, :-1]  # drop one class: the simplex makes it redundant
         return jnp.ravel(p)
 
     if len(idx) == 0:
         J = np.zeros((0, 0))
     else:
-        J = np.asarray(jax.jacrev(predictions_from_free)(p0_j[idx_j]), dtype=float)
+        J = np.asarray(jax.jacrev(flat_predictions)(x0), dtype=float)
     if J.size == 0:
         s = np.zeros(0)
         Vt = np.zeros((0, 0))
@@ -222,7 +294,7 @@ def numerical_local_identifiability(fit, subject: int = 0, *, rank_tol=None) -> 
         tol = rank_tol if rank_tol is not None else max(J.shape) * np.finfo(float).eps * (s[0] if s.size else 1.0)
         rank = int(np.sum(s > tol))
     cond = np.inf if s.size == 0 or rank < len(idx) or s[-1] == 0 else float(s[0] / s[-1])
-    names = tuple(np.asarray(fit.input.parameter_names, dtype=object)[free])
+    names = tuple(np.asarray(fit.input.parameter_names, dtype=object)[idx])
     return LocalIdentifiability(s, rank, len(idx) - rank, cond, Vt, names)
 
 
@@ -286,7 +358,7 @@ def observation_noise_correction(fit, subject: int = 0) -> ObservationNoiseCorre
     self-consistency (the posterior covariance itself depends on the noise
     scale).  One step removes most of the bias; a small downward bias survives
     at the smallest trial counts.  See
-    ``gbmtoolbox/dev/09_observation_noise_correction.py`` for the measured
+    ``gbmtoolbox/dev/11_observation_noise_correction.py`` for the measured
     behaviour against the analytic result for a linear model.
 
     Only Gaussian observations have an estimated ``R``; other families return
@@ -307,30 +379,13 @@ def observation_noise_correction(fit, subject: int = 0) -> ObservationNoiseCorre
         return ObservationNoiseCorrection(empty, empty, reported, np.nan, 0, int(idx.size), empty, False)
 
     sigma = np.asarray(covariance, dtype=float)[np.ix_(idx, idx)]
-    prepared = prepare_subject_data(fit.data[subject])
-    config = fit.profile.config
-    parameters = jnp.asarray(np.asarray(fit.output.parameters[subject], dtype=float))
-    idx_j = jnp.asarray(idx, dtype=jnp.int32)
-
-    def predictions_from_free(x):
-        full = parameters.at[idx_j].set(x)
-        out = model.evaluate_jax(
-            full,
-            prepared,
-            filter_max_iter=config.filter_max_iter,
-            filter_tol=config.filter_tol,
-            filter_damping=config.filter_damping,
-            filter_jitter=config.filter_jitter,
-        )
-        return jnp.atleast_2d(out["prediction"].reshape(out["prediction"].shape[0], -1))
-
-    x0 = parameters[idx_j]
-    predictions = np.asarray(predictions_from_free(x0), dtype=float)
-    jacobian = np.asarray(jax.jacrev(predictions_from_free)(x0), dtype=float)
+    prediction_fn, _, x0 = _free_prediction_function(fit, subject)
+    predictions = np.asarray(prediction_fn(x0), dtype=float)
+    jacobian = np.asarray(jax.jacrev(prediction_fn)(x0), dtype=float)
 
     y = np.asarray(fit.data[subject]["y"], dtype=float).reshape(predictions.shape[0], -1)
     residual = y - predictions
-    n_trials, obs_dim = residual.shape
+    n_trials = residual.shape[0]
 
     # Per output dimension: sum_t r_t^2 and sum_t J_t Sigma J_t^T.
     sse = np.sum(residual**2, axis=0)

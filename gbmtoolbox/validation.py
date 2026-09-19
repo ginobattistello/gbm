@@ -14,6 +14,11 @@ from .state_model import prepare_subject_data, trial_input
 
 @dataclass(frozen=True)
 class ValidatedSpec:
+    """Shapes and names confirmed by preflight, reused by the fitting code.
+
+    Returned so the checks run once per fit rather than once per subject.
+    """
+
     n_subjects: int
     n_parameters: int
     n_state: int
@@ -22,6 +27,7 @@ class ValidatedSpec:
 
 
 def _check_numeric_finite(value, name: str):
+    """Reject non-numeric or non-finite entries in user data."""
     arr = np.asarray(value)
     if arr.dtype.kind not in "biufc":
         raise TypeError(f"{name} must be numeric/bool for the JAX backend")
@@ -30,6 +36,7 @@ def _check_numeric_finite(value, name: str):
 
 
 def _validate_u(u, T: int, subject: int):
+    """Check trial inputs have one entry per trial and usable dtypes."""
     if u is None:
         return
     if isinstance(u, dict):
@@ -159,8 +166,7 @@ def validate_fit_spec(data, model, config) -> ValidatedSpec:
     # would otherwise be reported as genuine filtered uncertainty.
     if config.latent_uncertainty == "filtered" and not model.has_state_uncertainty():
         raise ValueError(
-            "latent_uncertainty='filtered' requires initial-state uncertainty or process_covariance; "
-            "use 'propagated' or 'none' for a deterministic state model"
+            "latent_uncertainty='filtered' requires initial-state uncertainty or process_covariance; use 'propagated' or 'none' for a deterministic state model"
         )
 
     # Explicit JAX smoke test on one complete subject likelihood and its gradient.
@@ -168,6 +174,7 @@ def validate_fit_spec(data, model, config) -> ValidatedSpec:
     p0 = jnp.asarray(layout.mean, dtype=jnp.float64)
 
     def objective(p):
+        """Total log-likelihood, used only for the preflight gradient check."""
         run = model.evaluate_jax(
             p,
             prepared,

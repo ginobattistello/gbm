@@ -14,6 +14,13 @@ from .priors import GaussianPrior, Priors
 
 @dataclass(frozen=True)
 class HBIConfig:
+    """Stopping rule for the hierarchical refitting loop.
+
+    ``tol`` is applied to the change in the group prior between sweeps, so the
+    loop ends once the group level has stopped moving rather than after a fixed
+    number of passes.
+    """
+
     maxiter: int = 30
     tol: float = 1e-3
     verbose: bool = True
@@ -28,6 +35,12 @@ class HBIConfig:
 
 @dataclass
 class HBIResult:
+    """Group-level result: refitted subjects and per-model responsibilities.
+
+    ``responsibilities`` is subjects-by-models and each row sums to one;
+    ``model_frequency`` summarises it at the group level.
+    """
+
     models: list
     fits: list
     responsibilities: np.ndarray
@@ -40,6 +53,7 @@ class HBIResult:
 
 
 def _responsibilities(lme, alpha):
+    """Posterior probability of each model per subject, from log evidence."""
     log_r = lme + (psi(alpha) - psi(np.sum(alpha)))[None, :]
     log_r -= np.max(log_r, axis=1, keepdims=True)
     r = np.exp(log_r)
@@ -48,6 +62,7 @@ def _responsibilities(lme, alpha):
 
 
 def _weighted_block_prior(fit, weights, slc, original_prior: GaussianPrior):
+    """Responsibility-weighted moment match for one parameter block."""
     means = fit.output.parameters[:, slc]
     d = means.shape[1]
     if d == 0:

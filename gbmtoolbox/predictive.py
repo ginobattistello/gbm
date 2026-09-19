@@ -14,11 +14,18 @@ from .state_model import trial_input
 
 @dataclass
 class PredictiveResult:
+    """Parameter draws and the datasets simulated from them.
+
+    ``replicated_data`` entries have the same shape as real subject data, so
+    they can be summarised with whatever statistic is used on the observations.
+    """
+
     parameters: np.ndarray
     replicated_data: list[dict]
 
 
 def _draw_gaussian(mean, cov, rng):
+    """Draw from a Gaussian, tolerating a singular or zero covariance."""
     mean = np.asarray(mean, dtype=float).reshape(-1)
     cov = np.asarray(cov, dtype=float)
     if mean.size == 0 or np.allclose(cov, 0.0):
@@ -29,6 +36,7 @@ def _draw_gaussian(mean, cov, rng):
 
 
 def _jaxify_u(u_t):
+    """Convert trial inputs to JAX arrays for simulation."""
     if u_t is None:
         return None
     return jax.tree_util.tree_map(jnp.asarray, u_t)
@@ -72,6 +80,12 @@ def simulate_subject(model, parameters, template_data, *, rng):
 
 
 def prior_predictive(model, template_data, *, n_samples=100, random_state=42) -> PredictiveResult:
+    """Simulate datasets from the prior, before seeing any outcomes.
+
+    Answers whether the model can produce data that look like the real thing
+    at all: ``template_data`` supplies the trial inputs, and only the outcomes
+    are replaced.
+    """
     if n_samples < 1:
         raise ValueError("n_samples must be >= 1")
     rng = np.random.default_rng(random_state)
@@ -82,6 +96,11 @@ def prior_predictive(model, template_data, *, n_samples=100, random_state=42) ->
 
 
 def posterior_predictive(fit, subject=0, *, n_samples=100, random_state=42) -> PredictiveResult:
+    """Simulate datasets from the fitted Laplace posterior of one subject.
+
+    Requires a valid Laplace approximation, since the draws come from it, and
+    raises rather than silently falling back to the MAP point.
+    """
     if n_samples < 1:
         raise ValueError("n_samples must be >= 1")
     diag = fit.math.diagnostics[subject]

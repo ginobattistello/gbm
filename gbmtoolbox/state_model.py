@@ -46,6 +46,7 @@ def trial_input(u: Any, t: int, T: int):
 
 
 def _prepare_u(u: Any, T: int):
+    """Convert trial inputs to fixed-shape JAX arrays, checking lengths."""
     if u is None:
         return None
     if isinstance(u, dict):
@@ -80,6 +81,7 @@ def prepare_subject_data(subject_data: dict):
 
 
 def _expand_covariance_jax(value, dim: int):
+    """Expand scalar or diagonal covariance notation to a matrix."""
     arr = jnp.asarray(value, dtype=jnp.float64)
     if arr.ndim == 0:
         return jnp.eye(dim, dtype=arr.dtype) * arr
@@ -89,6 +91,7 @@ def _expand_covariance_jax(value, dim: int):
 
 
 def _mode(value):
+    """Classify how a covariance was supplied."""
     if value is None:
         return "none"
     if isinstance(value, str):
@@ -179,22 +182,27 @@ class StateModel:
 
     @property
     def n_state(self) -> int:
+        """Number of latent-state dimensions, taken from ``initial_state``."""
         return int(self.initial_state.size)
 
     @property
     def n_theta(self) -> int:
+        """Number of static evolution parameters; 0 for observation-only models."""
         return self.priors.evolution.dim
 
     @property
     def n_phi(self) -> int:
+        """Number of static observation parameters."""
         return self.priors.observation.dim
 
     @property
     def process_covariance_mode(self) -> str:
+        """How ``Q`` is supplied: ``none``, ``diagonal``, ``fixed`` or ``custom``."""
         return _mode(self.process_covariance)
 
     @property
     def observation_covariance_mode(self) -> str:
+        """How ``R`` is supplied, resolving an omitted Gaussian ``R`` to ``diagonal``."""
         mode = _mode(self.observation_covariance)
         if mode == "none" and self.family == "gaussian":
             # Gaussian outcomes have no likelihood without R, so an omitted
@@ -204,6 +212,12 @@ class StateModel:
 
     @property
     def resolved_observation_dim(self) -> int:
+        """Number of estimated observation-noise SDs.
+
+        Zero unless ``R`` is being estimated. Otherwise it is ``observation_dim``
+        when the modeller gave one, else the dimension implied by a multivariate
+        ``observation_noise_prior``, else a single shared SD.
+        """
         if self.observation_covariance_mode != "diagonal":
             return 0
         if self.observation_dim is not None:
@@ -214,6 +228,11 @@ class StateModel:
 
     @cached_property
     def parameter_layout(self) -> ParameterLayout:
+        """Resolved fitted vector ``[theta, phi, log_process_sd, log_observation_sd]``.
+
+        Cached because it is derived purely from the priors and covariance
+        modes, all of which are frozen at construction.
+        """
         return build_parameter_layout(
             self.priors,
             process_noise_dim=self.n_state if self.process_covariance_mode == "diagonal" else 0,
@@ -224,6 +243,7 @@ class StateModel:
 
     @property
     def n_parameters(self) -> int:
+        """Length of the full fitted vector, including any noise parameters."""
         return self.parameter_layout.dim
 
     def split_parameters(self, parameters):
@@ -232,17 +252,26 @@ class StateModel:
         return p[self.parameter_layout.theta_slice], p[self.parameter_layout.phi_slice]
 
     def unpack_parameters(self, parameters):
+        """Split a fitted vector into ``(theta, phi, log_process_sd, log_observation_sd)``."""
         return self.parameter_layout.unpack(parameters)
 
     def initial_covariance_matrix(self) -> np.ndarray:
+        """Prior covariance of ``x_0`` as a matrix; zeros when the state is known."""
         if self.initial_state_covariance is None:
             return np.zeros((self.n_state, self.n_state), dtype=float)
         return covariance_matrix(self.initial_state_covariance, self.n_state, name="initial_state_covariance", allow_semidefinite=True)
 
     def initial_covariance_jax(self):
+        """``initial_covariance_matrix`` as a JAX array for the filter."""
         return jnp.asarray(self.initial_covariance_matrix(), dtype=jnp.float64)
 
     def process_covariance_jax(self, theta, rho_q, u_t):
+        """State-noise covariance ``Q_t`` for one trial.
+
+        When ``Q`` is estimated it is rebuilt from the fitted log SDs, so it
+        varies with the parameters; a callable ``process_covariance`` may also
+        depend on ``theta`` and the trial input.
+        """
         mode = self.process_covariance_mode
         if mode == "none":
             return jnp.zeros((self.n_state, self.n_state), dtype=jnp.float64)
@@ -252,6 +281,7 @@ class StateModel:
         return _expand_covariance_jax(value, self.n_state)
 
     def observation_covariance_jax(self, phi, rho_r, u_t, dim: int):
+        """Observation-noise covariance ``R_t`` for one trial (Gaussian only)."""
         mode = self.observation_covariance_mode
         if mode == "diagonal":
             return jnp.diag(jnp.exp(2.0 * rho_r))
@@ -261,14 +291,23 @@ class StateModel:
         return _expand_covariance_jax(value, dim)
 
     def process_covariance_matrix(self, theta, u_t, rho_q=None) -> np.ndarray:
+        """Host-side ``Q_t`` as a NumPy array, for reporting and diagnostics."""
         rho_q = jnp.zeros((0,)) if rho_q is None else jnp.asarray(rho_q)
         return np.asarray(self.process_covariance_jax(jnp.asarray(theta), rho_q, u_t), dtype=float)
 
     def observation_covariance_matrix(self, phi, u_t, dim: int, rho_r=None) -> np.ndarray:
+        """Host-side ``R_t`` as a NumPy array, for reporting and diagnostics."""
         rho_r = jnp.zeros((0,)) if rho_r is None else jnp.asarray(rho_r)
         return np.asarray(self.observation_covariance_jax(jnp.asarray(phi), rho_r, u_t, dim), dtype=float)
 
     def has_state_uncertainty(self) -> bool:
+        """Whether the latent state is stochastic and so needs filtering.
+
+        True when ``initial_state_covariance`` or ``process_covariance`` is
+        non-zero. This decides whether the likelihood runs the filter or the
+        cheaper deterministic recursion, independently of what
+        ``Config.latent_uncertainty`` chooses to display.
+        """
         if np.any(self.initial_covariance_matrix() != 0.0):
             return True
         mode = self.process_covariance_mode
@@ -279,12 +318,21 @@ class StateModel:
         return bool(np.any(np.asarray(self.process_covariance, dtype=float) != 0.0))
 
     def deterministic_run_jax(self, parameters, prepared_data):
+        """Run the model forward with a deterministic latent state.
+
+        One ``jax.lax.scan`` over trials in the order
+        ``x_t -> eta_t -> log p(y_t) -> evolution -> x_{t+1}``, returning the
+        per-trial log-likelihood, states and predictions. Used whenever
+        ``has_state_uncertainty()`` is false, which covers every model with no
+        process or initial-state noise.
+        """
         theta, phi, _, rho_r = self.unpack_parameters(parameters)
         family = get_family(self.family)
         y = prepared_data["y"]
         u = prepared_data["u"]
 
         def one_step(x, y_t, u_t):
+            """Score one trial and advance the state."""
             eta = jnp.atleast_1d(self.observation(x, phi, u_t))
             R = None
             if self.family == "gaussian":
@@ -297,12 +345,14 @@ class StateModel:
         if u is None:
 
             def step(x, y_t):
+                """scan body when the model takes no trial inputs."""
                 return one_step(x, y_t, None)
 
             _, (states, predictions, loglik) = jax.lax.scan(step, jnp.asarray(self.initial_state), y)
         else:
 
             def step(x, inp):
+                """scan body pairing each outcome with its trial input."""
                 y_t, u_t = inp
                 return one_step(x, y_t, u_t)
 
@@ -318,6 +368,12 @@ class StateModel:
     def evaluate_jax(
         self, parameters, prepared_data, *, filter_max_iter: int = 8, filter_tol: float = 1e-8, filter_damping: float = 1.0, filter_jitter: float = 1e-9
     ):
+        """Evaluate the model in JAX, filtering only when the state is stochastic.
+
+        This is the single entry point the likelihood, the optimiser and the
+        Jacobian-based diagnostics all go through, which is why differentiating
+        it propagates correctly through the latent trajectory.
+        """
         if self.has_state_uncertainty():
             from .filtering import nonlinear_state_filter_jax
 
@@ -327,6 +383,12 @@ class StateModel:
         return self.deterministic_run_jax(parameters, prepared_data)
 
     def evaluate(self, parameters, subject_data, *, config=None):
+        """Host-side ``evaluate_jax``: NumPy arrays plus the filtering method used.
+
+        Also squeezes the trailing axis off scalar Gaussian and Bernoulli
+        predictions, so a single-output model reports ``(T,)`` rather than
+        ``(T, 1)``.
+        """
         prepared = prepare_subject_data(subject_data)
         kwargs = {}
         if config is not None:
@@ -345,4 +407,5 @@ class StateModel:
         return host
 
     def __call__(self, parameters, subject_data):
+        """Per-trial log-likelihood, so the model can be used as a plain function."""
         return self.evaluate(parameters, subject_data)["loglik"]

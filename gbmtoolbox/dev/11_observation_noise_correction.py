@@ -1,4 +1,4 @@
-"""Reference case: observation-noise correction for parameter uncertainty.
+"""Reference check 11: observation-noise correction for parameter uncertainty.
 
 The MAP estimate of the observation SD uses the residuals at the fitted
 parameters, which treats those parameters as known exactly. For a linear model
@@ -14,14 +14,7 @@ trials and parameters.
 
 import numpy as np
 
-from gbmtoolbox import (
-    Config,
-    GaussianPrior,
-    Priors,
-    StateModel,
-    individual_fit,
-    observation_noise_correction,
-)
+from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit, observation_noise_correction
 
 TRUE_SD = 1.0
 N_REPLICATES = 60
@@ -50,9 +43,7 @@ def build_model(n_params):
     return StateModel(
         observation=observation,
         family="gaussian",
-        priors=Priors(
-            observation=GaussianPrior([0.0] * n_params, [100.0] * n_params, names=[f"b{i}" for i in range(n_params)])
-        ),
+        priors=Priors(observation=GaussianPrior([0.0] * n_params, [100.0] * n_params, names=[f"b{i}" for i in range(n_params)])),
         initial_state=[0.0],
         observation_noise_prior=GaussianPrior([0.0], [FLAT_NOISE_PRIOR], names=["log_observation_sd"]),
     )
@@ -94,10 +85,7 @@ def main():
             corrected_z = abs(corrected - TRUE_SD) / se
             worst_residual_z = max(worst_residual_z, residual_z)
             worst_corrected_z = max(worst_corrected_z, corrected_z)
-            print(
-                f"{n_trials:>5}{n_params:>4}{residual:>11.4f}{expected_residual:>11.4f}"
-                f"{corrected:>11.4f}{residual_z:>9.2f}{corrected_z:>9.2f}"
-            )
+            print(f"{n_trials:>5}{n_params:>4}{residual:>11.4f}{expected_residual:>11.4f}{corrected:>11.4f}{residual_z:>9.2f}{corrected_z:>9.2f}")
 
     print(f"\nworst residual deviation from the analytic MLE bias : {worst_residual_z:.2f} sigma")
     print(f"worst corrected deviation from the true SD          : {worst_corrected_z:.2f} sigma")

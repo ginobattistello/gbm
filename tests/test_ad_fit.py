@@ -1,13 +1,16 @@
 import numpy as np
+
 from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit
 
 
 def test_deterministic_bernoulli_fit_uses_ad_hessian():
     def evolution(x, theta, u_t, y_t):
         return x
+
     def observation(x, phi, u_t):
         return phi[0]
-    y = np.array([0,1,1,1,0,1,1,0,1,1], dtype=int)
+
+    y = np.array([0, 1, 1, 1, 0, 1, 1, 0, 1, 1], dtype=int)
     model = StateModel(
         evolution=evolution,
         observation=observation,
