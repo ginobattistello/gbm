@@ -50,3 +50,43 @@ def test_invalid_seeds_fail_early(seed):
         Config(random_state=seed)
     with pytest.raises(ValueError, match="random_state"):
         HBIConfig(random_state=seed)
+
+
+def test_parallel_fit_reproduces_sequential_fit_exactly():
+    rng = np.random.default_rng(21)
+    data = []
+    for _ in range(5):
+        u = rng.normal(size=30)
+        data.append({"y": 0.4 + 0.7 * u + rng.normal(scale=0.5, size=30), "u": u})
+    # Lambdas must survive the trip to worker processes.
+    model = StateModel(observation=lambda x, phi, u_t: phi[0] + phi[1] * u_t, priors=Priors(observation=GaussianPrior([0.0, 0.0], [4.0, 4.0])))
+    cfg = Config(num_init=3, random_state=8, verbose=False, latent_uncertainty="propagated", latent_samples=20)
+    sequential = individual_fit(data, model, config=cfg)
+    parallel = individual_fit(data, model, config=replace(cfg, n_jobs=2))
+    np.testing.assert_array_equal(parallel.output.parameters, sequential.output.parameters)
+    np.testing.assert_array_equal(parallel.output.log_evidence, sequential.output.log_evidence)
+    for a, b in zip(parallel.output.latent, sequential.output.latent):
+        np.testing.assert_array_equal(a["state"]["mean"], b["state"]["mean"])
+    for a, b in zip(parallel.math.diagnostics, sequential.math.diagnostics):
+        assert [s.n_evaluations for s in a.starts] == [s.n_evaluations for s in b.starts]
+
+
+@pytest.mark.parametrize("n_jobs", [0, -2, 1.5, True])
+def test_invalid_n_jobs_fail_early(n_jobs):
+    with pytest.raises(ValueError, match="n_jobs"):
+        Config(n_jobs=n_jobs)
+
+
+def test_pickled_model_recomputes_its_execution_key():
+    import pickle
+
+    model = StateModel(observation=_scaled_observation, priors=Priors(observation=GaussianPrior([0.0], [1.0])))
+    _ = model.execution_key
+    clone = pickle.loads(pickle.dumps(model))
+    assert "execution_key" not in clone.__dict__
+    assert clone.execution_key == model.execution_key  # module-level callables are shared by reference
+
+
+def _scaled_observation(x, phi, u_t):
+    """Module-level observation, so the model pickles with the standard library."""
+    return phi[0] + 0.0 * x[0]

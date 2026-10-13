@@ -3,6 +3,17 @@
 
 ## Unreleased (0.2.0.dev0)
 
+### Parallel subject fitting (2026-10-13)
+
+- `Config(n_jobs=...)` fits subjects in worker processes (`1`, the default, is
+  sequential; `-1` uses one worker per CPU). Workers are started by joblib's
+  `loky` backend, which is now a dependency; each receives the model once and
+  fits its share of subjects one at a time. Results are bitwise identical to
+  the sequential fit because every subject keeps its own seed stream.
+  `hbi_main` and `prior_sensitivity` pass the setting through.
+- Pickling a `StateModel` drops its cached `execution_key`, which holds
+  process-specific callable ids, so a worker recomputes it.
+
 ### Single-subject vector input (2026-10-13)
 
 - `individual_fit(y, model, u=u)` fits one subject from its outcome vector,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -300,6 +301,88 @@ def _subject_list(data, u, family: str) -> list:
     return [{"y": y, "u": u}]
 
 
+def _fit_subject(subject, model, config, seed, *, prepared=None, objective_context=None):
+    """MAP/Laplace fit, MAP prediction and latent report for one subject.
+
+    ``seed`` is the subject's own ``SeedSequence``; it is split into separate
+    optimizer and latent-uncertainty streams, so a subject's result does not
+    depend on which other subjects are fitted, in what order, or in which
+    process.
+    """
+    subject_started = perf_counter()
+    prepared = prepare_subject_data(subject) if prepared is None else prepared
+    fit_seed, latent_seed = seed.spawn(2)
+    fit_rng = np.random.default_rng(fit_seed)
+    latent_rng = np.random.default_rng(latent_seed)
+    opt = optimize_map(subject, model, config, rng=fit_rng, prepared_data=prepared, objective_context=objective_context)
+    prediction_started = perf_counter()
+    run_map = model.evaluate(opt.parameters, subject, config=config, prepared_data=prepared)
+    prediction = np.asarray(run_map["prediction"], dtype=float)
+    opt.diagnostics.timings["prediction"] = perf_counter() - prediction_started
+    latent_started = perf_counter()
+    if config.latent_uncertainty == "propagated":
+        latent = _latent_propagated(opt, model, subject, config, latent_rng, prepared_data=prepared, run_map=run_map)
+    elif config.latent_uncertainty == "filtered":
+        latent = _latent_filtered(run_map, model)
+    else:
+        latent = _latent_none(run_map, model)
+    opt.diagnostics.timings["latent_uncertainty"] = perf_counter() - latent_started
+    opt.diagnostics.timings["subject_total"] = perf_counter() - subject_started
+    return opt, prediction, latent
+
+
+def _resolve_workers(n_jobs: int, n_subjects: int) -> int:
+    """Number of worker processes: ``-1`` means one per CPU, never more than subjects."""
+    requested = (os.cpu_count() or 1) if n_jobs == -1 else n_jobs
+    return max(1, min(requested, n_subjects))
+
+
+def _clear_compiled_caches():
+    """Drop compiled functions kept by an earlier task in this worker process.
+
+    Each task receives a freshly unpickled model whose functions have new
+    identities, so earlier cache entries can never be hit again; clearing them
+    bounds memory in long-lived workers.
+    """
+    from . import optimization, state_model
+
+    state_model._EVALUATOR_CACHE.clear()
+    optimization._COMPILED_OBJECTIVE_CACHE.clear()
+    _PROPAGATION_CACHE.clear()
+
+
+def _fit_subject_batch(subjects, model, config, seeds):
+    """Worker task: fit several subjects with one copy of the model.
+
+    Sending a batch rather than one subject per task means the model is
+    unpickled, and its likelihood compiled, once per worker instead of once
+    per subject.
+    """
+    _clear_compiled_caches()
+    return [_fit_subject(subject, model, config, seed) for subject, seed in zip(subjects, seeds)]
+
+
+def _fit_subjects_parallel(data, model, config, seeds, n_workers):
+    """Fit subjects in ``n_workers`` processes, returning results in subject order.
+
+    Subjects are dealt round-robin to one task per worker. joblib's ``loky``
+    backend starts fresh processes (forking after JAX has started threads is
+    unsafe) and sends model callables with cloudpickle, so lambdas and functions
+    defined in a script or notebook work.
+    """
+    from joblib import Parallel, delayed
+
+    batches = [list(range(k, len(data), n_workers)) for k in range(n_workers)]
+    outputs = Parallel(n_jobs=n_workers, backend="loky")(
+        delayed(_fit_subject_batch)([data[n] for n in batch], model, config, [seeds[n] for n in batch]) for batch in batches
+    )
+    results = [None] * len(data)
+    for batch, output in zip(batches, outputs):
+        for n, result in zip(batch, output):
+            results[n] = result
+    return results
+
+
 def individual_fit(data, model, *, u=None, config: Config | None = None) -> FitResult:
     """Fit every subject under one :class:`~gbmtoolbox.StateModel`.
 
@@ -322,33 +405,26 @@ def individual_fit(data, model, *, u=None, config: Config | None = None) -> FitR
     # Stable, separate streams: uncertainty draws must not change MAP starts
     # for subsequent subjects. Adding subjects at the end preserves earlier ones.
     subject_seeds = np.random.SeedSequence(config.random_state).spawn(len(data))
-    opts = []
-    latent = []
-    predictions = []
-
-    for n, subject in enumerate(data):
-        subject_started = perf_counter()
-        prepared = validated.prepared_subjects[n]
-        fit_seed, latent_seed = subject_seeds[n].spawn(2)
-        fit_rng = np.random.default_rng(fit_seed)
-        latent_rng = np.random.default_rng(latent_seed)
-        opt = optimize_map(subject, model, config, rng=fit_rng, prepared_data=prepared, objective_context=validated.objective_context if n == 0 else None)
-        opts.append(opt)
-        prediction_started = perf_counter()
-        run_map = model.evaluate(opt.parameters, subject, config=config, prepared_data=prepared)
-        predictions.append(np.asarray(run_map["prediction"], dtype=float))
-        opt.diagnostics.timings["prediction"] = perf_counter() - prediction_started
-        latent_started = perf_counter()
-        if config.latent_uncertainty == "propagated":
-            latent_n = _latent_propagated(opt, model, subject, config, latent_rng, prepared_data=prepared, run_map=run_map)
-        elif config.latent_uncertainty == "filtered":
-            latent_n = _latent_filtered(run_map, model)
-        else:
-            latent_n = _latent_none(run_map, model)
-        latent.append(latent_n)
-        opt.diagnostics.timings["latent_uncertainty"] = perf_counter() - latent_started
-        opt.diagnostics.timings["subject_total"] = perf_counter() - subject_started
-        if config.verbose:
+    n_workers = _resolve_workers(config.n_jobs, len(data))
+    if n_workers == 1:
+        results = [
+            _fit_subject(
+                subject,
+                model,
+                config,
+                subject_seeds[n],
+                prepared=validated.prepared_subjects[n],
+                objective_context=validated.objective_context if n == 0 else None,
+            )
+            for n, subject in enumerate(data)
+        ]
+    else:
+        results = _fit_subjects_parallel(data, model, config, subject_seeds, n_workers)
+    opts = [r[0] for r in results]
+    predictions = [r[1] for r in results]
+    latent = [r[2] for r in results]
+    if config.verbose:
+        for n, opt in enumerate(opts):
             status = "valid" if opt.diagnostics.laplace_valid else "INVALID"
             frag = " (fragile)" if opt.diagnostics.laplace_fragile else ""
             print(f"Subject {n + 1:02d}: log joint={opt.log_joint:.3f}, Laplace={status}{frag}")

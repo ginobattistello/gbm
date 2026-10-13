@@ -406,6 +406,23 @@ settings must remain immutable; construct a new callable/model when those
 settings change. Cache entries hold strong references and persist for the
 Python process, so reusing model functions limits cache growth.
 
+`Config(n_jobs=n)` fits subjects in `n` worker processes (`-1`: one per CPU;
+the default `1` fits them sequentially in the calling process). Subjects are
+dealt round-robin to one task per worker, so each worker receives the model
+once, compiles its likelihood once, and fits its subjects one after another.
+Workers are fresh processes started by joblib's `loky` backend, because
+forking a process in which JAX has started threads is unsafe, and models are
+sent with cloudpickle, so lambdas and functions defined in a script or notebook
+work. Each subject keeps its own seed stream, so parameters, evidence,
+diagnostics and propagated latent draws are bitwise identical to the
+sequential fit. The calling process still validates the specification first,
+so modelling errors surface before any worker starts. Warnings raised inside
+workers are printed by the workers; progress lines are printed afterwards in
+subject order. Parallel fitting helps when a subject takes seconds rather than
+milliseconds; for fast models, worker start-up and per-worker compilation
+dominate. The model's callables and any data they capture must be picklable
+by cloudpickle.
+
 Data are prepared once per subject. Preflight compiles and checks the same
 value-and-gradient executable used by the optimizer, retaining the first
 evaluation. It checks the clipped initial point when hard bounds are supplied.

@@ -48,12 +48,19 @@ class Config:
     latent_interval: float | None = 0.95
     parameter_scaling: bool = False
 
+    #: Worker processes for ``individual_fit``: 1 fits subjects sequentially in
+    #: this process, ``n > 1`` fits them in ``n`` processes, ``-1`` uses one per
+    #: CPU. Results do not depend on this setting.
+    n_jobs: int = 1
+
     def __post_init__(self):
         """Validate every setting and normalise the latent-uncertainty mode."""
         if not isinstance(self.num_init, int) or self.num_init < 1:
             raise ValueError("num_init must be a positive integer")
         if not isinstance(self.maxiter, int) or self.maxiter < 1:
             raise ValueError("maxiter must be a positive integer")
+        if isinstance(self.n_jobs, (bool, np.bool_)) or not isinstance(self.n_jobs, (int, np.integer)) or not (self.n_jobs == -1 or self.n_jobs >= 1):
+            raise ValueError("n_jobs must be a positive integer or -1")
         if not isinstance(self.parameter_scaling, bool):
             raise TypeError("parameter_scaling must be a boolean")
         if self.random_state is not None and (

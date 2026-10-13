@@ -138,6 +138,15 @@ config = Config(num_init=1, parameter_scaling=True, verbose=False)
 fit = individual_fit(data, model, config=config)
 ```
 
+Subjects can be fitted in parallel worker processes, one subject at a time
+per worker, with `Config(n_jobs=4)` (or `-1` for one worker per CPU). Results
+are identical to the sequential fit. Parallel fitting pays off when each
+subject takes a while: on a 10-core laptop, 24 subjects of a 1,500-trial
+filtered Bernoulli model took 23.4 s sequentially and 8.1 s with four workers.
+Fast models gain nothing, because starting workers and compiling the model in
+each one costs about as much as the fits themselves. `hbi_main` and
+`prior_sensitivity` pass `n_jobs` through to their fits.
+
 For timing, use `fit.profile.timings` (validation, preflight, total) and
 `fit.math.diagnostics[subject].timings` (first objective, optimization,
 Hessian, predictions, latent uncertainty, and totals). The preflight timer

@@ -14,7 +14,7 @@ true_sigma = rng.uniform(0.20, 1.00, size=n_subjects)
 data = [simulate_continuous_subject(rng, n_trials, g, o, s) for g, o, s in zip(true_gain, true_offset, true_sigma)]
 model = continuous_model()
 print("resolved parameters:", model.parameter_layout.names)
-fit = individual_fit(data, model, config=Config(num_init=5, random_state=42, display=False))
+fit = individual_fit(data, model, config=Config(num_init=5, random_state=42, display=False, n_jobs=-1))
 print(fit.summary(subject=0))
 estimated_gain = fit.output.evolution_parameters[:, 0]
 estimated_offset = fit.output.observation_parameters[:, 0]

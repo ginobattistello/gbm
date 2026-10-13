@@ -267,6 +267,17 @@ class StateModel:
         """Length of the full fitted vector, including any noise parameters."""
         return self.parameter_layout.dim
 
+    def __getstate__(self):
+        """Pickle without the cached ``execution_key``.
+
+        The key holds the ``id`` of this process's callables. Unpickled in a
+        worker, the callables are new objects, so the key is recomputed there
+        rather than risk matching a different model's compiled function.
+        """
+        state = self.__dict__.copy()
+        state.pop("execution_key", None)
+        return state
+
     @cached_property
     def execution_key(self):
         """Execution structure, excluding names and numerical prior values.
