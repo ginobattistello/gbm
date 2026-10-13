@@ -44,7 +44,7 @@ class Config:
     latent_uncertainty: str = "none"
     latent_samples: int | None = 1000
     latent_interval: float | None = 0.95
-    parameter_scaling: bool = True
+    parameter_scaling: bool = False
 
     def __post_init__(self):
         if not isinstance(self.num_init, int) or self.num_init < 1:
