@@ -1,4 +1,4 @@
-"""Exact Gamma noise prior: density, MAP, Hessian, evidence, and Bayes factors.
+"""Reference check 12: exact Gamma noise prior density, MAP, Hessian, evidence and Bayes factors.
 
 Reference: integrating a Gamma precision analytically with fixed predictions.
 Laplace evidence is compared to its known Stirling error, not treated as exact.

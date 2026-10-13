@@ -3,7 +3,7 @@ import pytest
 
 from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, bms, individual_fit, prior_sensitivity
 from gbmtoolbox.display import _trace_styles
-from gbmtoolbox.parameters import DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
+from gbmtoolbox.parameters import default_observation_noise_prior
 from gbmtoolbox.validation import validate_fit_spec
 
 
@@ -34,7 +34,7 @@ def test_gaussian_defaults_to_estimated_observation_covariance():
     assert m.observation_covariance_mode == "diagonal"
     assert "log_observation_sd" in m.parameter_layout.names
     var = np.diag(m.parameter_layout.covariance)[m.parameter_layout.observation_noise_slice]
-    assert var == pytest.approx([DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE])
+    assert var == pytest.approx([default_observation_noise_prior(1).covariance[0, 0]])
 
 
 def test_explicit_observation_covariance_overrides_default():

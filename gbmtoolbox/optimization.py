@@ -13,12 +13,14 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize
 
-jax.config.update("jax_enable_x64", True)
 _COMPILED_OBJECTIVE_CACHE = {}
 
-_JAX_CACHE = Path.home() / ".cache" / "gbmtoolbox" / "jax"
-jax.config.update("jax_compilation_cache_dir", str(_JAX_CACHE))
-jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.5)
+# Persist compiled executables across processes, unless the user has already
+# chosen a cache directory (``jax.config`` or ``JAX_COMPILATION_CACHE_DIR``).
+# Disable with ``jax.config.update("jax_enable_compilation_cache", False)``.
+if jax.config.jax_compilation_cache_dir is None:
+    jax.config.update("jax_compilation_cache_dir", str(Path.home() / ".cache" / "gbmtoolbox" / "jax"))
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.5)
 
 
 @dataclass(frozen=True)
@@ -47,14 +49,17 @@ class Config:
     parameter_scaling: bool = False
 
     def __post_init__(self):
+        """Validate every setting and normalise the latent-uncertainty mode."""
         if not isinstance(self.num_init, int) or self.num_init < 1:
             raise ValueError("num_init must be a positive integer")
         if not isinstance(self.maxiter, int) or self.maxiter < 1:
             raise ValueError("maxiter must be a positive integer")
         if not isinstance(self.parameter_scaling, bool):
-            raise ValueError("parameter_scaling must be a boolean")
-        if self.random_state is not None and not isinstance(self.random_state, (int, np.integer)):
-            raise ValueError("random_state must be an integer or None")
+            raise TypeError("parameter_scaling must be a boolean")
+        if self.random_state is not None and (
+            isinstance(self.random_state, (bool, np.bool_)) or not isinstance(self.random_state, (int, np.integer)) or self.random_state < 0
+        ):
+            raise ValueError("random_state must be a nonnegative integer or None")
         if self.hessian_method not in {"autodiff", "central_fd"}:
             raise ValueError("hessian_method must be 'autodiff' or 'central_fd'")
         if self.hessian_relative_step <= 0:
@@ -109,8 +114,8 @@ class OptimizationDiagnostics:
     Covers the multi-start search (``starts``, ``search_path``), the winning
     optimiser run (``lbfgsb_*``, ``abs_grad``) and the separately recomputed
     observed Hessian (``hess_*``, ``laplace_*``). ``laplace_valid`` is false
-    when that Hessian is not positive definite, which is reported rather than
-    repaired: a good MAP can coexist with an unusable Laplace approximation.
+    when the selected optimizer run has not converged or that Hessian is not
+    positive definite. These failures are reported rather than repaired.
     """
 
     starts: list[StartRecord] = field(default_factory=list)
@@ -129,6 +134,8 @@ class OptimizationDiagnostics:
     hess_ill_conditioned: bool = False
     laplace_valid: bool = False
     laplace_fragile: bool = False
+    map_converged: bool = False
+    hess_positive_definite: bool = False
     timings: dict[str, float] = field(default_factory=dict)
     n_evaluations: int = 0
     parameter_scaling: str = "none"
@@ -185,21 +192,27 @@ def _reconstruct_host(free_values, mean, free_mask):
     return full
 
 
-def _resolved_hard_bounds(config: Config, model):
-    """Return one hard-bound entry per resolved parameter.
+def resolved_hard_bounds(config: Config, model):
+    """Validate ``Config.hard_bounds`` against the model's resolved parameters.
 
-    For backward compatibility, a bound vector covering only the historical
-    ``[theta, phi]`` blocks is accepted when automatic Q/R parameters are
-    present; generated noise parameters are left unbounded.
+    One entry is required per resolved parameter, in ``model.parameter_layout``
+    order and including any estimated noise log-SDs; ``None`` leaves a
+    parameter unbounded, as does ``None`` for either side of a pair.
     """
     if config.hard_bounds is None:
         return None
-    bounds = list(config.hard_bounds)
-    if len(bounds) == model.priors.dim and model.n_parameters > model.priors.dim:
-        bounds.extend([None] * (model.n_parameters - model.priors.dim))
+    bounds = tuple(config.hard_bounds)
     if len(bounds) != model.n_parameters:
-        raise ValueError("hard_bounds must contain one entry per resolved parameter, or one entry per theta/phi parameter when Q/R are estimated internally")
-    return tuple(bounds)
+        raise ValueError(f"hard_bounds must contain one entry per resolved parameter ({model.n_parameters}: {', '.join(model.parameter_layout.names)})")
+    for j, pair in enumerate(bounds):
+        if pair is None:
+            continue
+        if len(pair) != 2:
+            raise ValueError(f"hard_bounds[{j}] must be (low, high) or None")
+        lo, hi = pair
+        if lo is not None and hi is not None and not lo < hi:
+            raise ValueError(f"hard_bounds[{j}] must satisfy low < high")
+    return bounds
 
 
 def _free_bounds(resolved_bounds, free_mask):
@@ -255,15 +268,23 @@ def _compiled_objective_functions(model, free_idx, config):
 
     free_idx = tuple(int(i) for i in free_idx)
     from .priors import GammaPrecisionPrior
+
     gamma = isinstance(model.parameter_layout.observation_noise_prior, GammaPrecisionPrior)
-    key = (model.execution_key, free_idx, gamma, int(config.filter_max_iter), float(config.filter_tol), float(config.filter_damping), float(config.filter_jitter))
+    key = (
+        model.execution_key,
+        free_idx,
+        gamma,
+        int(config.filter_max_iter),
+        float(config.filter_tol),
+        float(config.filter_damping),
+        float(config.filter_jitter),
+    )
     cached = _COMPILED_OBJECTIVE_CACHE.get(key)
     if cached is not None:
         return cached
     free_idx_j = jnp.asarray(free_idx, dtype=jnp.int32)
 
-    def components(z, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data,
-                   correction_arguments, offset, transform):
+    def components(z, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data, correction_arguments, offset, transform):
         """Log-likelihood and log-prior at one free-parameter vector."""
         # Reconstruct full parameter vector.
         x = offset + transform @ z
@@ -290,6 +311,7 @@ def _compiled_objective_functions(model, free_idx, config):
         return -(loglik + logprior)
 
     def objective_with_components(x, *args):
+        """Objective plus its log-likelihood and log-prior, for value_and_grad."""
         loglik, logprior = components(x, *args)
         return -(loglik + logprior), (loglik, logprior)
 
@@ -307,7 +329,7 @@ def _objective_context(model, config, prepared_data):
     """Prepare shared objective arguments for validation and optimization."""
     layout = model.parameter_layout
     mean, mask, free_mean, cov, precision, logdet = _free_space(layout)
-    resolved_bounds = _resolved_hard_bounds(config, model)
+    resolved_bounds = resolved_hard_bounds(config, model)
     bounds = _free_bounds(resolved_bounds, mask)
     d = free_mean.size
     if config.parameter_scaling and d:
@@ -321,21 +343,42 @@ def _objective_context(model, config, prepared_data):
     if bounds is None:
         optimizer_bounds = None
     else:
-        optimizer_bounds = [(None if lo is None else (lo-offset[i])/transform[i, i],
-                             None if hi is None else (hi-offset[i])/transform[i, i]) for i, (lo, hi) in enumerate(bounds)]
-    args = (jnp.asarray(mean), jnp.asarray(free_mean), jnp.asarray(precision), jnp.asarray(logdet),
-            prepared_data, layout.prior_correction_arguments(), jnp.asarray(offset), jnp.asarray(transform))
-    return dict(mean=mean, mask=mask, free_mean=free_mean, covariance=cov, bounds=bounds,
-                resolved_bounds=resolved_bounds, optimizer_bounds=optimizer_bounds, offset=offset,
-                transform=transform, inverse=inverse, scaling=scaling, args=args,
-                compiled=_compiled_objective_functions(model, np.flatnonzero(mask), config))
+        optimizer_bounds = [
+            (None if lo is None else (lo - offset[i]) / transform[i, i], None if hi is None else (hi - offset[i]) / transform[i, i])
+            for i, (lo, hi) in enumerate(bounds)
+        ]
+    args = (
+        jnp.asarray(mean),
+        jnp.asarray(free_mean),
+        jnp.asarray(precision),
+        jnp.asarray(logdet),
+        prepared_data,
+        layout.prior_correction_arguments(),
+        jnp.asarray(offset),
+        jnp.asarray(transform),
+    )
+    return dict(
+        mean=mean,
+        mask=mask,
+        free_mean=free_mean,
+        covariance=cov,
+        bounds=bounds,
+        resolved_bounds=resolved_bounds,
+        optimizer_bounds=optimizer_bounds,
+        offset=offset,
+        transform=transform,
+        inverse=inverse,
+        scaling=scaling,
+        args=args,
+        compiled=_compiled_objective_functions(model, np.flatnonzero(mask), config),
+    )
 
 
 def preflight_objective(model, config, prepared_data):
     """Warm and check exactly the executable subsequently used by SciPy."""
     context = _objective_context(model, config, prepared_data)
     x0 = _clip_to_bounds(context["free_mean"], context["bounds"])
-    z0 = context["inverse"] @ (x0-context["offset"])
+    z0 = context["inverse"] @ (x0 - context["offset"])
     result = context["compiled"]["value_and_grad"](jnp.asarray(z0), *context["args"])
     (value, (ll, lp)), grad = jax.device_get(result)
     if not np.isfinite(value) or not np.isfinite(ll) or not np.isfinite(lp) or not np.all(np.isfinite(grad)):
@@ -418,10 +461,12 @@ def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data
     compiled, args = context["compiled"], context["args"]
 
     def to_free(z):
+        """Optimizer coordinates to free-parameter coordinates."""
         return offset + transform @ np.asarray(z, dtype=float)
 
     def to_optimizer(x):
-        return inverse @ (np.asarray(x, dtype=float)-offset)
+        """Free-parameter coordinates to optimizer coordinates."""
+        return inverse @ (np.asarray(x, dtype=float) - offset)
 
     def objective_jax(x):
         """Negative log joint at ``x``."""
@@ -441,7 +486,7 @@ def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data
         first_result = context["preflight_result"]
     else:
         first_result = jax.device_get(objective_value_and_grad_jax(jnp.asarray(first_z)))
-    first_seconds = perf_counter()-first_started
+    first_seconds = perf_counter() - first_started
 
     if d == 0:
         (_, (ll, lp)), _ = first_result
@@ -458,8 +503,15 @@ def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data
             hess_method=config.hessian_method,
             laplace_valid=True,
             laplace_fragile=False,
-            timings={"first_objective": first_seconds, "optimization": 0.0, "hessian": 0.0,
-                     "map_components": 0.0, "optimize_total": perf_counter()-total_started},
+            map_converged=True,
+            hess_positive_definite=True,
+            timings={
+                "first_objective": first_seconds,
+                "optimization": 0.0,
+                "hessian": 0.0,
+                "map_components": 0.0,
+                "optimize_total": perf_counter() - total_started,
+            },
             parameter_scaling=context["scaling"],
         )
         return OptimizationResult(mean.copy(), np.zeros(0), ll, lp, ll + lp, np.zeros((0, 0)), np.zeros((0, 0)), ll + lp, diagnostics, free_mask)
@@ -496,20 +548,32 @@ def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data
     best_fval = np.inf
     best_path = None
     best_path_log_joint = None
+    best_success = False
     optimization_started = perf_counter()
+
+    def log_joint_at(z):
+        """Log joint at ``z``, reusing SciPy's latest evaluation when it is there."""
+        if np.array_equal(z, last_x):
+            return -float(last_result[0][0])
+        return -float(objective_jax(jnp.asarray(z, dtype=jnp.float64)))
 
     for init in init_list:
         z_init = to_optimizer(init)
         path = [z_init.copy()]
+        # The start's own value is filled in only if this start wins.
+        path_log_joint = [np.nan]
 
         def callback(xk):
-            """Record the search path for this start."""
+            """Record the search path and its log joint for this start."""
             # `path` is rebound each iteration and L-BFGS-B calls this
             # synchronously, so the closure always appends to the current start.
             path.append(np.asarray(xk, dtype=float).copy())
+            path_log_joint.append(log_joint_at(xk))
 
         start_started = perf_counter()
-        res = minimize(scipy_fun, z_init, method="L-BFGS-B", jac=True, bounds=context["optimizer_bounds"], callback=callback, options={"maxiter": config.maxiter})
+        res = minimize(
+            scipy_fun, z_init, method="L-BFGS-B", jac=True, bounds=context["optimizer_bounds"], callback=callback, options={"maxiter": config.maxiter}
+        )
         fval = float(res.fun)
         if getattr(res, "jac", None) is not None:
             grad = np.asarray(res.jac, dtype=float)
@@ -527,22 +591,22 @@ def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data
                 n_iter=int(getattr(res, "nit", 0)),
                 gradient_norm=float(np.linalg.norm(inverse.T @ grad)) if np.all(np.isfinite(grad)) else np.nan,
                 n_evaluations=int(getattr(res, "nfev", 0)),
-                elapsed_seconds=perf_counter()-start_started,
+                elapsed_seconds=perf_counter() - start_started,
             )
         )
-        if np.isfinite(fval) and fval < best_fval:
+        successful = bool(res.success and np.isfinite(fval))
+        if np.isfinite(fval) and (best is None or (successful and not best_success) or (successful == best_success and fval < best_fval)):
             best = res
+            best_success = successful
             best_fval = float(fval)
             best_path = np.vstack(path)
-            if config.display:
-                best_path_log_joint = np.asarray([-float(objective_jax(jnp.asarray(z, dtype=jnp.float64))) for z in best_path], dtype=float)
-            else:
-                best_path_log_joint = None
+            best_path_log_joint = np.asarray(path_log_joint, dtype=float)
 
     if best is None or not np.isfinite(best_fval):
         raise RuntimeError("MAP optimization did not find a finite objective value")
 
-    optimization_seconds = perf_counter()-optimization_started
+    best_path_log_joint[0] = log_joint_at(best_path[0])
+    optimization_seconds = perf_counter() - optimization_started
     zhat = np.asarray(best.x, dtype=float)
     xhat = to_free(zhat)
     full_hat = _reconstruct_host(xhat, mean, free_mask)
@@ -551,7 +615,7 @@ def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data
     final_result = last_result if np.array_equal(zhat, last_x) else jax.device_get(objective_value_and_grad_jax(jnp.asarray(zhat)))
     (_, (final_ll_j, final_lp_j)), _ = final_result
     final_ll, final_lp = float(final_ll_j), float(final_lp_j)
-    components_seconds = perf_counter()-components_started
+    components_seconds = perf_counter() - components_started
     logjoint = final_ll + final_lp
     at_bounds_full = _at_hard_bounds(full_hat, resolved_hard_bounds)
     at_any_bound = bool(np.any(at_bounds_full))
@@ -562,7 +626,7 @@ def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data
         H = inverse.T @ H_z @ inverse
     else:
         H = central_hessian(lambda x: float(objective_jax(jnp.asarray(to_optimizer(x), dtype=jnp.float64))), xhat, config.hessian_relative_step)
-    hessian_seconds = perf_counter()-hessian_started
+    hessian_seconds = perf_counter() - hessian_started
     H = 0.5 * (H + H.T)
     if not np.all(np.isfinite(H)):
         raise FloatingPointError("observed Hessian contains non-finite values")
@@ -572,13 +636,16 @@ def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data
     positive_definite = bool(np.all(eig > 0.0))
     condition_number = float(max_eig / min_eig) if positive_definite and min_eig > 0 else np.inf
     ill = bool(positive_definite and (not np.isfinite(condition_number) or condition_number >= config.condition_number_warn))
-    laplace_valid = positive_definite
+    map_converged = bool(best.success and np.isfinite(logjoint))
+    laplace_valid = bool(positive_definite and map_converged)
     laplace_fragile = bool(laplace_valid and (ill or at_any_bound))
 
     if ill and config.verbose:
         warnings.warn("observed Hessian is ill-conditioned; Laplace uncertainty/evidence may be unreliable", RuntimeWarning, stacklevel=2)
     if at_any_bound and config.verbose:
         warnings.warn("MAP estimate lies on a hard bound; the Gaussian Laplace approximation may be unreliable", RuntimeWarning, stacklevel=2)
+    if not map_converged and config.verbose:
+        warnings.warn("MAP optimization did not converge; covariance and log evidence are unavailable", RuntimeWarning, stacklevel=2)
 
     if laplace_valid:
         covariance = np.linalg.inv(H)
@@ -612,11 +679,16 @@ def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data
         hess_ill_conditioned=ill,
         laplace_valid=laplace_valid,
         laplace_fragile=laplace_fragile,
-        timings={"first_objective": first_seconds, "optimization": optimization_seconds,
-                 "map_components": components_seconds, "hessian": hessian_seconds,
-                 "optimize_total": perf_counter()-total_started},
+        map_converged=map_converged,
+        hess_positive_definite=positive_definite,
+        timings={
+            "first_objective": first_seconds,
+            "optimization": optimization_seconds,
+            "map_components": components_seconds,
+            "hessian": hessian_seconds,
+            "optimize_total": perf_counter() - total_started,
+        },
         n_evaluations=sum(s.n_evaluations for s in starts),
         parameter_scaling=context["scaling"],
     )
     return OptimizationResult(full_hat, xhat, final_ll, final_lp, logjoint, H, covariance, log_evidence, diagnostics, free_mask)
-

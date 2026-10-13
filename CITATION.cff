@@ -6,7 +6,7 @@ version: 0.1.0
 date-released: 2026-09-11
 authors:
   - name: "GBM Toolbox contributors"
-repository-code: "https://github.com/ginobattistello/BayesGBM"
+repository-code: "https://github.com/ginobattistello/gbm"
 license: MIT
 preferred-citation:
   type: article
@@ -25,3 +25,4 @@ preferred-citation:
   journal: PLOS Computational Biology
   year: 2019
   doi: "10.1371/journal.pcbi.1007043"
+

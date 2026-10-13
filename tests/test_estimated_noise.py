@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit
 
@@ -35,7 +36,7 @@ def test_estimated_q_r_are_positive_and_in_full_posterior():
     assert fit.math.hessian[0].shape == (2, 2)  # only Q/R are free
 
 
-def test_theta_phi_only_hard_bounds_remain_valid_with_internal_noise():
+def test_hard_bounds_cover_every_resolved_parameter_including_internal_noise():
     def evolution(x, theta, u_t, y_t):
         return jnp.asarray([theta[0] * x[0]])
 
@@ -52,18 +53,25 @@ def test_theta_phi_only_hard_bounds_remain_valid_with_internal_noise():
         observation_noise_prior=GaussianPrior([-0.7], [0.5]),
     )
     data = [{"y": np.zeros(6), "u": None}]
-    cfg = Config(num_init=1, maxiter=20, verbose=False, hard_bounds=[(-0.99, 0.99), (-2.0, 2.0)])
+    cfg = Config(num_init=1, maxiter=20, verbose=False, hard_bounds=[(-0.99, 0.99), (-2.0, 2.0), None])
     fit = individual_fit(data, model, config=cfg)
     assert fit.output.parameters.shape[1] == 3
+
+    # A theta/phi-only bound list no longer pads the noise entries silently.
+    short = Config(num_init=1, maxiter=20, verbose=False, hard_bounds=[(-0.99, 0.99), (-2.0, 2.0)])
+    with pytest.raises(ValueError, match="one entry per resolved parameter"):
+        individual_fit(data, model, config=short)
 
 
 def test_explicit_gaussian_observation_noise_matches_analytic_posterior_mode():
     """An explicit Gaussian log-SD prior retains the historical objective."""
     from scipy.optimize import brentq
-    from gbmtoolbox.parameters import DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN, DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
+
+    from gbmtoolbox.parameters import default_observation_noise_prior
 
     mu = 1.25
-    m0, v = DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN, DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
+    default = default_observation_noise_prior(1)
+    m0, v = float(default.mean[0]), float(default.covariance[0, 0])
     rng = np.random.default_rng(11)
     y = mu + rng.normal(scale=0.4, size=300)
 

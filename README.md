@@ -20,6 +20,7 @@ def evolution(x, theta, u_t, y_t):
     # latent state x_t -> x_{t+1}
     ...
 
+
 def observation(x, phi, u_t):
     # latent state x_t -> observation prediction
     ...
@@ -89,14 +90,7 @@ model = StateModel(
     state_names=["Q0", "Q1"],
 )
 
-fit = individual_fit(
-    data,
-    model,
-    config=Config(
-        latent_uncertainty="propagated",
-        display=True,
-    ),
-)
+fit = individual_fit(data, model, config=Config(latent_uncertainty="propagated", display=True))
 ```
 
 The static parameter dimension is inferred from the priors. A zero prior
@@ -137,10 +131,10 @@ Prior-scaled optimization is available with `Config(parameter_scaling=True)`;
 it is disabled by default. Full Cholesky scaling
 is used without hard bounds; diagonal scaling preserves box bounds when they
 are supplied. Return values, Hessians, covariance, and evidence remain in the
-original parameter coordinates. To compare with the previous search geometry:
+original parameter coordinates.
 
 ```python
-config = Config(num_init=1, parameter_scaling=False, verbose=False)
+config = Config(num_init=1, parameter_scaling=True, verbose=False)
 fit = individual_fit(data, model, config=config)
 ```
 
@@ -178,14 +172,15 @@ print(conditions.pxp)  # protected EP of equal-family tuples
 
 # Unequal group sample sizes are supported.
 groups = bms_groups([L_patients, L_controls], families=families)
-print(groups.probability_equal)      # shared family-frequency profile
-print(groups.probability_different) # separate family-frequency profiles
+print(groups.probability_equal)  # shared family-frequency profile
+print(groups.probability_different)  # separate family-frequency profiles
 ```
 
 Existing 2D calls preserve the original model-only prior of one count per
 model. Family analyses default to one total prior count, equally divided over
-families and then their models. Two-candidate exceedance probabilities are
-analytic; larger comparisons use reproducible, memory-bounded sampling.
+families and then their models. Variational two-candidate exceedance probabilities use Beta tails.
+Two marginal families use numerical integration; larger comparisons use
+reproducible, memory-bounded sampling.
 
 Condition comparisons enumerate model tuples and require matching subject rows
 and separately integrated condition-specific fits. Group comparisons follow
@@ -194,31 +189,69 @@ default to comparing family frequencies, marginalizing uniformly over models
 within each family. Use `group_level="models"` to compare full model-frequency
 profiles with family-balanced priors, as in VBA's group routine.
 
-The supplied dictionary interface is available as `GroupBMS(L, options=...)`.
-For group inputs use `result["p_equal"]`/`result["p_different"]`; these are
-hypothesis probabilities, not exceedance probabilities. The earlier group-tuple
+Group results report `probability_equal`/`probability_different`; these are
+hypothesis probabilities, not exceedance probabilities. VBA's default of one
+prior count in total is reproduced by passing `alpha0` explicitly; without
+families the native default is one count per model. The earlier group-tuple
 construction and ad hoc family-BOR adjustment are replaced by explicitly
 specified hypotheses. See [the manual](docs/MANUAL.md#extended-bms)
 for assumptions, factorial conditions, prior choices, and migration details.
 Tutorial: `gbmtoolbox/examples/11_family_condition_group_bms.py`.
+
+## Reliability and reproducibility update
+
+- Gaussian filtering consistently uses the ordinary EKF linearization (at default
+  damping). Multistate Gaussian and discrete filters no longer differentiate
+  through covariance eigenvectors; singular state support is preserved.
+- Evidence and posterior covariance require a converged MAP and positive-definite
+  observed Hessian. Unfinished fits return `NaN` evidence and `None` covariance;
+  HBI refuses those fits.
+- HBI stopping includes group covariance changes. Returned group priors match
+  the priors used by returned subject fits, including at the iteration limit.
+- Family inference defaults to `family_method="marginal"`: uniformly integrate
+  models inside each family. Two-family reports and two-category group odds
+  use deterministic quadrature, avoiding weak-evidence mean-field bias in those
+  comparisons. Two-family `posterior_parameters` is `None` because the exact
+  frequency posterior is generally not Dirichlet. `family_method="aggregate"`
+  retains the previous aggregation. Larger spaces and model-only reports still
+  use approximate variational inference.
+
+`Config(random_state=42)` seeds individual fitting and propagated uncertainty
+through separate subject streams. HBI inherits that seed unless an explicit
+`HBIConfig(random_state=...)` is supplied. BMS and predictive simulations have
+separate seed arguments. `random_state=None` requests unseeded draws. Seeded
+results can be reproducible while runtime varies because compilation, cache
+reuse, and hardware load are not controlled by the seed. The new stream split
+changes random restarts relative to earlier releases. See the
+[manual](docs/MANUAL.md#reproducibility-and-variable-runtime) for scope and timing.
+Parameter scaling remains **disabled by default**.
 
 ## Data
 
 Each subject is represented as:
 
 ```python
-data[n] = {
-    "y": outcomes,
-    "u": inputs,
-}
+data[n] = {"y": outcomes, "u": inputs}
 ```
 
-`u` is deliberately generic. It may be `None`, a trialwise array, or a
+`u` is deliberately generic and optional. It may be omitted, `None`, a trialwise array, or a
 dictionary whose non-scalar values have first dimension equal to the number of
 trials. GBM Toolbox never requires field names such as `reward` or `stimulus`.
 
 Field values must be numeric or boolean, so a categorical condition is encoded
 as a numeric code (`0`/`1`) rather than a string label.
+
+A single subject can also be passed directly as its outcome vector, with the
+trial inputs as a keyword. `u` may have any number of dimensions as long as its
+first axis is trials; the model receives `u[t]` on trial `t`:
+
+```python
+fit = individual_fit(y, model, u=u)  # y: (T,), u: (T,) or (T, ...) or a dict
+```
+
+This runs exactly the same fit as `individual_fit([{"y": y, "u": u}], model)`.
+Several subjects are always passed as a list of dicts, which also allows
+different trial counts per subject.
 
 ## Latent uncertainty
 
@@ -332,8 +365,10 @@ model = StateModel(..., observation_covariance=0.25)
 ```
 
 Explicit `GaussianPrior` specifications on log SD remain supported unchanged.
-`observation_noise_prior_from_scale(y)` also retains its previous Gaussian
-moment approximation. Estimating its scale from the fitted outcomes is an
+`observation_noise_prior_from_scale(y, prior_sample_size=nu0)` returns the same
+exact Gamma form, `Gamma(nu0/2, nu0*s0**2/2)` on precision, with the scale `s0`
+read robustly from `y` (or given as `prior_scale`); `prior_scale=1` with
+`nu0=2` is the default. Estimating its scale from the fitted outcomes is an
 opt-in empirical-Bayes choice. For strict Bayesian evidence, use the fixed
 default or a prior specified from independent information. Keep the same
 noise prior across candidate models when that reflects the same measurement
@@ -376,7 +411,9 @@ measure the prior's influence or validate the reported posterior noise SD.
 Values above 1 indicate prediction uncertainty contributes to residual energy.
 
 It is a **diagnostic**: it changes neither the fit nor its log-evidence, so
-model comparison is unaffected. The correction is evaluated once at the MAP
+model comparison is unaffected. It applies to deterministic latent states; with
+initial-state or process noise the residuals also contain latent-state
+variance, so the result is returned with `valid=False`. The correction is evaluated once at the MAP
 rather than iterated to self-consistency, which removes most of the bias but
 leaves a little at the smallest trial counts. See
 `dev/11_observation_noise_correction.py` for the measured behaviour against the
@@ -455,7 +492,8 @@ original HBI variational equations.
 7. `07_predictive_checks.py` — prior and posterior predictive checks;
 8. `08_filtered_state_model.py` — internal latent-state uncertainty from filtering;
 9. `09_observation_only.py` — observation-only models for all three outcome families;
-10. `10_observation_noise_correction.py` — checking whether the reported observation noise is trustworthy.
+10. `10_observation_noise_correction.py` — checking whether the reported observation noise is trustworthy;
+11. `11_family_condition_group_bms.py` — family, paired-condition and between-group model selection.
 
 ## Documentation
 
@@ -508,5 +546,6 @@ claim that this review is exhaustive. Contributions of every kind are therefore
 warmly encouraged: bug reports, independent replication, method review,
 corrections to the mathematics or the documentation, additional validation cases,
 and critical reading of the present work. Please open an issue or a pull request.
+
 
 

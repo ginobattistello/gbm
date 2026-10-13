@@ -5,8 +5,8 @@ from __future__ import annotations
 import copy
 import warnings
 from dataclasses import dataclass, field
-from time import perf_counter
 from datetime import datetime
+from time import perf_counter
 from typing import Any
 
 import jax
@@ -14,10 +14,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from .optimization import Config, OptimizationDiagnostics, OptimizationResult, optimize_map
-
-from .state_model import prepare_subject_data, filter_settings
-from .validation import validate_fit_spec
 from .priors import GammaPrecisionPrior
+from .state_model import filter_settings, prepare_subject_data
+from .validation import validate_fit_spec
 
 _PROPAGATION_CACHE = {}
 
@@ -27,10 +26,20 @@ def _noise_prior_description(prior):
     if prior is None:
         return None
     if isinstance(prior, GammaPrecisionPrior):
-        return {"distribution": "gamma_precision", "shape": prior.shape.copy(), "rate": prior.rate.copy(),
-                "parameterization": "log_standard_deviation", "names": tuple(prior.names or ())}
-    return {"distribution": "gaussian_log_sd", "mean": prior.mean.copy(), "covariance": prior.covariance.copy(),
-            "parameterization": "log_standard_deviation", "names": tuple(prior.names or ())}
+        return {
+            "distribution": "gamma_precision",
+            "shape": prior.shape.copy(),
+            "rate": prior.rate.copy(),
+            "parameterization": "log_standard_deviation",
+            "names": tuple(prior.names or ()),
+        }
+    return {
+        "distribution": "gaussian_log_sd",
+        "mean": prior.mean.copy(),
+        "covariance": prior.covariance.copy(),
+        "parameterization": "log_standard_deviation",
+        "names": tuple(prior.names or ()),
+    }
 
 
 def _compiled_propagation(model, config):
@@ -108,8 +117,9 @@ class FitOutput:
 class FitMath:
     """Quantities behind the estimates: densities, curvature and diagnostics.
 
-    ``hessian`` and ``covariance`` live in each subject's free space, selected
-    by ``free_mask``; ``covariance`` is ``None`` where the Laplace
+    ``hessian`` lives in each subject's free space, selected by ``free_mask``.
+    ``covariance`` is embedded back into the full parameter vector, with zero
+    rows and columns for fixed parameters, and is ``None`` where the Laplace
     approximation was rejected.
     """
 
@@ -163,6 +173,7 @@ class FitResult:
         return fit_summary(self, subject=subject)
 
     def __repr__(self):
+        """Show the first subject's summary rather than the raw dataclass."""
         return self.summary(0)
 
 
@@ -264,13 +275,53 @@ def _latent_propagated(opt, model, subject_data, config, rng, *, prepared_data=N
     }
 
 
-def individual_fit(data, model, *, config: Config | None = None) -> FitResult:
-    """Fit every subject under one :class:`~gbmtoolbox.StateModel`."""
+def _subject_list(data, u, family: str) -> list:
+    """Normalise ``individual_fit`` input to a list of ``{"y", "u"}`` subject dicts.
+
+    A list or tuple containing dicts is the multi-subject form and is returned
+    unchanged. Anything else is one subject's outcomes: a vector with one entry
+    per trial (or, for a multivariate Gaussian, a ``(trials, outputs)`` array),
+    paired with ``u``. Stacked subjects are rejected rather than guessed at,
+    because a 2-D array cannot say whether its rows are subjects or trials.
+    """
+    if isinstance(data, (list, tuple)) and any(isinstance(item, dict) for item in data):
+        if u is not None:
+            raise ValueError("u is only for a single subject's outcome vector; with a list of subjects, put each subject's inputs in its own dict")
+        return list(data)
+    if isinstance(data, (list, tuple)) and len(data) == 0:
+        return list(data)
+    y = np.asarray(data)
+    if isinstance(data, (list, tuple)) and y.ndim != 1:
+        raise ValueError("pass several subjects as a list of {'y': ..., 'u': ...} dicts, or one subject's outcomes as a single vector")
+    allowed = (1, 2) if family == "gaussian" else (1,)
+    if y.ndim not in allowed:
+        shape = "a vector (trials,) or a (trials, outputs) array" if family == "gaussian" else "a vector with one entry per trial"
+        raise ValueError(f"a single subject's {family} outcomes must be {shape}, got shape {y.shape}; fit several subjects as a list of dicts")
+    return [{"y": y, "u": u}]
+
+
+def individual_fit(data, model, *, u=None, config: Config | None = None) -> FitResult:
+    """Fit every subject under one :class:`~gbmtoolbox.StateModel`.
+
+    ``data`` is either a list of subject dicts, ``[{"y": ..., "u": ...}, ...]``,
+    or a single subject's outcome vector ``y`` with one entry per trial. In the
+    single-subject form, trial inputs are passed as ``u``: an array of any
+    dimension whose first axis is trials (``u[t]`` is what the model receives on
+    trial ``t``), a dict of such arrays, or ``None``::
+
+        fit = individual_fit(y, model, u=u)  # y: (T,), u: (T, ...)
+
+    Both forms run the same fit; the result stores the subject as a dict, so
+    ``fit.data[0]["y"]`` works either way.
+    """
     fit_started = perf_counter()
     if config is None:
         config = Config()
+    data = _subject_list(data, u, model.family)
     validated = validate_fit_spec(data, model, config)
-    rng = np.random.default_rng(config.random_state)
+    # Stable, separate streams: uncertainty draws must not change MAP starts
+    # for subsequent subjects. Adding subjects at the end preserves earlier ones.
+    subject_seeds = np.random.SeedSequence(config.random_state).spawn(len(data))
     opts = []
     latent = []
     predictions = []
@@ -278,23 +329,25 @@ def individual_fit(data, model, *, config: Config | None = None) -> FitResult:
     for n, subject in enumerate(data):
         subject_started = perf_counter()
         prepared = validated.prepared_subjects[n]
-        opt = optimize_map(subject, model, config, rng=rng, prepared_data=prepared,
-                           objective_context=validated.objective_context if n == 0 else None)
+        fit_seed, latent_seed = subject_seeds[n].spawn(2)
+        fit_rng = np.random.default_rng(fit_seed)
+        latent_rng = np.random.default_rng(latent_seed)
+        opt = optimize_map(subject, model, config, rng=fit_rng, prepared_data=prepared, objective_context=validated.objective_context if n == 0 else None)
         opts.append(opt)
         prediction_started = perf_counter()
         run_map = model.evaluate(opt.parameters, subject, config=config, prepared_data=prepared)
         predictions.append(np.asarray(run_map["prediction"], dtype=float))
-        opt.diagnostics.timings["prediction"] = perf_counter()-prediction_started
+        opt.diagnostics.timings["prediction"] = perf_counter() - prediction_started
         latent_started = perf_counter()
         if config.latent_uncertainty == "propagated":
-            latent_n = _latent_propagated(opt, model, subject, config, rng, prepared_data=prepared, run_map=run_map)
+            latent_n = _latent_propagated(opt, model, subject, config, latent_rng, prepared_data=prepared, run_map=run_map)
         elif config.latent_uncertainty == "filtered":
             latent_n = _latent_filtered(run_map, model)
         else:
             latent_n = _latent_none(run_map, model)
         latent.append(latent_n)
-        opt.diagnostics.timings["latent_uncertainty"] = perf_counter()-latent_started
-        opt.diagnostics.timings["subject_total"] = perf_counter()-subject_started
+        opt.diagnostics.timings["latent_uncertainty"] = perf_counter() - latent_started
+        opt.diagnostics.timings["subject_total"] = perf_counter() - subject_started
         if config.verbose:
             status = "valid" if opt.diagnostics.laplace_valid else "INVALID"
             frag = " (fragile)" if opt.diagnostics.laplace_fragile else ""
@@ -341,13 +394,11 @@ def individual_fit(data, model, *, config: Config | None = None) -> FitResult:
             diagnostics=[o.diagnostics for o in opts],
             free_mask=[o.free_mask for o in opts],
         ),
-        profile=FitProfile(datetime=datetime.now().isoformat(timespec="seconds"), config=config,
-                           timings={**validated.timings}),
+        profile=FitProfile(datetime=datetime.now().isoformat(timespec="seconds"), config=config, timings={**validated.timings}),
         model=model,
         data=copy.deepcopy(data),
     )
     if config.display:
         result.plot(subject=0, display=True)
-    result.profile.timings["total"] = perf_counter()-fit_started
+    result.profile.timings["total"] = perf_counter() - fit_started
     return result
-

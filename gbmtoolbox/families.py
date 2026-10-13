@@ -92,7 +92,7 @@ class FamilyOps:
         """Normalized independent Gaussian density, without dense algebra."""
         eta = jnp.atleast_1d(eta)
         residual = jnp.atleast_1d(y).astype(eta.dtype) - eta
-        return -0.5 * jnp.sum(jnp.log(2.0 * jnp.pi) + 2.0 * log_sd + residual ** 2 * jnp.exp(-2.0 * log_sd))
+        return -0.5 * jnp.sum(jnp.log(2.0 * jnp.pi) + 2.0 * log_sd + residual**2 * jnp.exp(-2.0 * log_sd))
 
     def fisher(self, eta, observation_covariance=None):
         """Fisher information of ``eta``: minus the expected second derivative.
@@ -113,18 +113,6 @@ class FamilyOps:
             return jnp.diag(p) - jnp.outer(p, p)
         raise ValueError(f"unsupported family {self.name!r}")
 
-    def sample(self, key, eta, observation_covariance=None):
-        """Draw one outcome from the family, for predictive checks."""
-        eta = jnp.atleast_1d(eta)
-        if self.name == "gaussian":
-            return jax.random.multivariate_normal(key, eta, observation_covariance)
-        if self.name == "bernoulli":
-            draw = jax.random.bernoulli(key, logits=eta)
-            return draw.astype(jnp.int32)
-        if self.name == "categorical":
-            return jax.random.categorical(key, eta)
-        raise ValueError(f"unsupported family {self.name!r}")
-
 
 def get_family(name: str) -> FamilyOps:
     """Look up the likelihood primitives for a family name.
@@ -137,4 +125,3 @@ def get_family(name: str) -> FamilyOps:
     if family not in {"gaussian", "bernoulli", "categorical"}:
         raise ValueError("family must be 'gaussian', 'bernoulli', or 'categorical'")
     return FamilyOps(family)
-

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from .individual_fit import individual_fit
+from .optimization import Config
 
 
 @dataclass
@@ -24,7 +25,7 @@ class PriorSensitivityResult:
     posterior_variances: list[np.ndarray]
 
 
-def prior_sensitivity(data, model, priors_list, *, config):
+def prior_sensitivity(data, model, priors_list, *, config: Config | None = None):
     """Refit theta/phi priors while preserving model-level Q/R noise priors."""
     pmeans, pcovs, postmeans, postvars = [], [], [], []
     for priors in priors_list:

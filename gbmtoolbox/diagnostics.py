@@ -115,9 +115,13 @@ class NoiseCorrelationSummary:
     """Posterior correlations involving the estimated noise parameters.
 
     Strong correlation between a noise SD and a model parameter means the two
-    are trading off, and neither is pinned down on its own.
+    are trading off, and neither is pinned down on its own. ``correlation`` has
+    one row per free noise log-SD (``noise_names``) and one column per free
+    parameter (``parameter_names``); it is ``None`` without a valid Laplace
+    posterior.
     """
 
+    noise_names: tuple[str, ...]
     parameter_names: tuple[str, ...]
     correlation: np.ndarray | None
 
@@ -132,10 +136,11 @@ def convergence_diagnostics(fit, subject: int = 0, *, objective_tol=1e-4, parame
     diag = fit.math.diagnostics[subject]
     starts = list(diag.starts)
     if not starts:
+        # Every parameter is fixed: nothing was optimized, so there is nothing to disagree.
         return ConvergenceSummary(
             n_starts=0,
-            n_successful=1,
-            n_objective_agreeing=1,
+            n_successful=0,
+            n_objective_agreeing=0,
             agreement_fraction=1.0,
             log_joint_spread=0.0,
             max_parameter_distance=0.0,
@@ -154,7 +159,8 @@ def convergence_diagnostics(fit, subject: int = 0, *, objective_tol=1e-4, parame
     for i in range(len(endpoints)):
         for j in range(i + 1, len(endpoints)):
             maxdist = max(maxdist, float(np.linalg.norm(endpoints[i] - endpoints[j])))
-    spread = float(np.max(vals[finite]) - np.min(vals[finite])) if np.any(finite) else np.inf
+    # optimize_map guarantees at least one finite start, so ``best`` exists.
+    spread = float(best - np.min(vals[finite]))
     same = bool(np.all(agree) and maxdist <= parameter_tol * (1.0 + np.linalg.norm(fit.output.parameters[subject])))
     return ConvergenceSummary(
         n_starts=len(starts),
@@ -226,6 +232,7 @@ def prior_preconditioned_information(fit, subject: int = 0) -> DataInformationSp
     # Moment covariance defines the reporting scale. Subtract the actual
     # local prior curvature, not the Gaussian moment proxy, for Gamma noise.
     from .priors import GammaPrecisionPrior
+
     layout = fit.model.parameter_layout
     prior = layout.observation_noise_prior
     if isinstance(prior, GammaPrecisionPrior):
@@ -303,7 +310,9 @@ def numerical_local_identifiability(fit, subject: int = 0, *, rank_tol=None) -> 
         Vt = np.zeros((0, 0))
         rank = 0
     else:
-        _, s, Vt = np.linalg.svd(J, full_matrices=False)
+        # Complete the right basis when outputs < parameters, without
+        # allocating an outputs-by-outputs U for long datasets.
+        _, s, Vt = np.linalg.svd(J, full_matrices=J.shape[0] < J.shape[1])
         tol = rank_tol if rank_tol is not None else max(J.shape) * np.finfo(float).eps * (s[0] if s.size else 1.0)
         rank = int(np.sum(s > tol))
     cond = np.inf if s.size == 0 or rank < len(idx) or s[-1] == 0 else float(s[0] / s[-1])
@@ -312,25 +321,22 @@ def numerical_local_identifiability(fit, subject: int = 0, *, rank_tol=None) -> 
 
 
 def noise_parameter_correlations(fit, subject: int = 0) -> NoiseCorrelationSummary:
-    """Posterior correlation submatrix involving estimated Q/R log-SDs."""
+    """Posterior correlations between each estimated Q/R log-SD and every free parameter."""
     cov = fit.math.covariance[subject]
     if cov is None:
-        return NoiseCorrelationSummary(tuple(), None)
+        return NoiseCorrelationSummary((), (), None)
     layout = fit.model.parameter_layout
-    noise_idx = list(range(layout.process_noise_slice.start, layout.process_noise_slice.stop)) + list(
-        range(layout.observation_noise_slice.start, layout.observation_noise_slice.stop)
-    )
-    if not noise_idx:
-        return NoiseCorrelationSummary(tuple(), np.zeros((0, 0)))
-    all_idx = list(range(cov.shape[0]))
-    selected = sorted(set(all_idx + noise_idx))
-    C = cov[np.ix_(selected, selected)]
-    sd = np.sqrt(np.maximum(np.diag(C), 0.0))
-    denom = np.outer(sd, sd)
-    corr = np.divide(C, denom, out=np.zeros_like(C), where=denom > 0)
-    np.fill_diagonal(corr, 1.0)
-    names = tuple(np.asarray(fit.input.parameter_names, dtype=object)[selected])
-    return NoiseCorrelationSummary(names, corr)
+    free = np.asarray(fit.math.free_mask[subject], dtype=bool)
+    noise = np.zeros_like(free)
+    noise[layout.process_noise_slice] = True
+    noise[layout.observation_noise_slice] = True
+    rows, cols = np.flatnonzero(noise & free), np.flatnonzero(free)
+    names = np.asarray(fit.input.parameter_names, dtype=object)
+    sd = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    denom = np.outer(sd[rows], sd[cols])
+    block = cov[np.ix_(rows, cols)]
+    corr = np.divide(block, denom, out=np.zeros_like(block), where=denom > 0)
+    return NoiseCorrelationSummary(tuple(names[rows]), tuple(names[cols]), corr)
 
 
 def observation_noise_correction(fit, subject: int = 0) -> ObservationNoiseCorrection:
@@ -359,8 +365,12 @@ def observation_noise_correction(fit, subject: int = 0) -> ObservationNoiseCorre
     MLE-like estimate into the analogue of the unbiased :math:`SSE/(T-p)`.
 
     ``J`` is obtained by differentiating the model's own trajectory, so this
-    works for dynamical models too: the derivative propagates through the
-    latent states exactly as the likelihood does.
+    works for models with deterministic latent dynamics too: the derivative
+    propagates through the latent states exactly as the likelihood does.
+    With a stochastic latent state (initial-state or process noise) the
+    residuals are taken at the filter's predicted state, so they also contain
+    latent-state variance and would overstate ``R``; such models return an
+    empty, ``valid=False`` result.
 
     This is a **diagnostic**: it reports what the noise would be under the
     correction, and changes neither the fit nor its log-evidence.  A large
@@ -378,7 +388,7 @@ def observation_noise_correction(fit, subject: int = 0) -> ObservationNoiseCorre
     an empty, ``valid=False`` result.
     """
     model = fit.model
-    if model.family != "gaussian":
+    if model.family != "gaussian" or model.has_state_uncertainty():
         empty = np.zeros(0)
         return ObservationNoiseCorrection(empty, empty, empty, 0.0, 0, 0, empty, False)
 
@@ -419,4 +429,3 @@ def observation_noise_correction(fit, subject: int = 0) -> ObservationNoiseCorre
         inflation_factor=inflation,
         valid=True,
     )
-

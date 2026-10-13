@@ -38,6 +38,7 @@ You write two functions:
 def evolution(x, theta, u_t, y_t):
     """Latent state x_t -> x_{t+1}."""
 
+
 def observation(x, phi, u_t):
     """Latent state x_t -> what is predicted on this trial."""
 ```
@@ -84,15 +85,15 @@ from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit
 
 
 def evolution(x, theta, u_t, y_t):
-    alpha = jax.nn.sigmoid(theta[0])        # learning rate in (0, 1)
+    alpha = jax.nn.sigmoid(theta[0])  # learning rate in (0, 1)
     choice = y_t.astype(jnp.int32)
     reward = u_t["reward"]
     return x.at[choice].add(alpha * (reward - x[choice]))
 
 
 def observation(x, phi, u_t):
-    beta = jnp.exp(phi[0])                  # choice temperature > 0
-    return beta * (x[1] - x[0])             # Bernoulli logit
+    beta = jnp.exp(phi[0])  # choice temperature > 0
+    return beta * (x[1] - x[0])  # Bernoulli logit
 
 
 model = StateModel(
@@ -112,6 +113,15 @@ fit = individual_fit(data, model, config=Config(latent_uncertainty="propagated")
 
 This is the Rescorla-Wagner update,
 $Q_{c} \leftarrow Q_{c} + \alpha(r - Q_{c})$, applied to the chosen option.
+
+`data` is a list with one dict per subject, `{"y": outcomes, "u": inputs}`,
+where every array has trials on its first axis and `u` is optional. For one
+subject, the outcome vector can be passed directly, with inputs as a keyword:
+`individual_fit(y, model, u=u)`. `u` may be an array of any dimension (the
+model receives `u[t]`), a dict of such arrays, or omitted. Both forms run the
+same fit, and `fit.data[0]` stores the subject as a dict either way. A stacked
+subjects-by-trials matrix is not accepted, because its rows could equally be
+trials of a multivariate outcome.
 
 ### Writing model functions
 
@@ -288,10 +298,13 @@ cancels in Bayes factors on the same data. Laplace evidence follows this rule
 for a consistently transformed parameterization, up to numerical error.
 Keeping Gamma(1,1) after changing units specifies different prior beliefs.
 
-The existing `observation_noise_prior_from_scale` helper remains an explicit
-Gaussian moment approximation for compatibility. Passing observed `y` uses its
-MAD (with an SD fallback) to choose a prior scale and therefore gives
-empirical-Bayes evidence conditional on that scale. It is not used by the
+`observation_noise_prior_from_scale(y, prior_sample_size=nu0)` returns the
+same exact form, $\lambda\sim\operatorname{Gamma}(\nu_0/2,\ \nu_0 s_0^2/2)$,
+so that $E[\lambda]=1/s_0^2$; `prior_scale=1` with $\nu_0=2$ is the default
+prior. Passing observed `y` uses its MAD (with an SD fallback) to choose
+$s_0$ and therefore gives empirical-Bayes evidence conditional on that scale;
+an outcome with no scale information (constant, or one trial) raises and asks
+for `prior_scale`. It is not used by the
 automatic default. Do not derive noise-prior scales from model-specific fitted
 residuals for model comparison.
 
@@ -317,19 +330,9 @@ Evidence comparisons require models for the same observed data and observation
 measure; Gaussian densities and binary/categorical masses for differently
 encoded outcomes are not directly comparable.
 
-To reproduce the previous default explicitly:
-
-```python
-from gbmtoolbox.parameters import (
-    DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN,
-    DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE,
-)
-legacy_prior = GaussianPrior(
-    [DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN],
-    [DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE],
-)
-model = StateModel(..., observation_noise_prior=legacy_prior)
-```
+The earlier Gaussian approximation can still be stated explicitly as a
+`GaussianPrior` on log SD with the moments above, mean
+$(\log b-\psi(a))/2$ and variance $\psi_1(a)/4$.
 
 `fit.input.observation_noise_prior` records the resolved distribution and its
 parameters. `prior_mean` and `prior_covariance` remain moments in the fitted
@@ -356,6 +359,9 @@ $$\hat{p} = \arg\max_{p}\ \log p(y \mid p) + \log p(p)$$
 
 Search is multi-start L-BFGS-B, from several starting points, keeping the best
 optimum found. The default is four starts (`Config(num_init=...)`).
+`Config(hard_bounds=...)` takes one `(low, high)` pair or `None` per resolved
+parameter, in `model.parameter_layout.names` order, including any estimated
+noise log-SDs; either side of a pair may be `None`.
 
 ### Fitting performance and optimizer coordinates
 
@@ -386,9 +392,8 @@ parameters also use original coordinates.
 
 Scaling changes numerical search paths and the effective stopping criterion.
 Nonlinear models can reach a different local optimum. Inspect convergence and
-retain multiple starts where needed; use `parameter_scaling=False` to reproduce
-the previous search geometry. The number of starts, maximum iterations, and
-filter update settings retain their previous defaults.
+retain multiple starts where needed. With the default
+`parameter_scaling=False` the optimizer searches the original free parameters.
 
 Objective and full-evaluation caches use immutable execution settings,
 callable identities, parameter block dimensions, and applicable free indices
@@ -462,6 +467,15 @@ recomputed from scratch at the final MAP, by automatic differentiation
 (`hessian_method="autodiff"`, the default) or central finite differences
 (`"central_fd"`). The two agree to finite-difference truncation error.
 
+`map_converged` reports convergence of the selected L-BFGS-B run;
+`hess_positive_definite` assesses the independently computed observed Hessian.
+`laplace_valid` requires both. If either fails, posterior covariance is `None`
+and log evidence is `NaN`. MAP/predictions and diagnostics are retained for
+inspection. Converged starts are preferred over unconverged starts; among them,
+the largest finite log joint wins. Optimizer success is a numerical criterion,
+not a guarantee of a global optimum. Hard-bound solutions remain flagged
+`laplace_fragile` because an unconstrained Gaussian may be inappropriate.
+
 Second, **the Hessian is never repaired.** If it is not positive definite, the
 Laplace approximation is invalid and is reported as invalid. No eigenvalue
 clipping, no nudging toward positive definiteness. A valid MAP and a valid
@@ -495,13 +509,26 @@ How the integral is handled depends on the outcome family:
 
 **Gaussian outcomes** use an extended Kalman update. When the model is actually
 linear, this is the exact Kalman filter, and the implementation reproduces the
-exact recursion to machine precision.
+exact recursion to machine precision with `filter_damping=1` (the default).
+The observation Jacobian, innovation covariance, gain, predictive likelihood,
+and filtered covariance now all use the same predicted-state linearization.
+The covariance uses the Joseph form. Nonlinear Gaussian results can therefore
+change relative to the former hybrid update that recomputed curvature at the
+updated state. Smaller damping deliberately underweights the mean update and
+uses the same damped gain in the Joseph covariance; it is not the ordinary EKF.
+Gaussian updates do not require eigenvectors of the state covariance.
 
 **Bernoulli and categorical outcomes** have no closed form. The toolbox uses a
 local Laplace-Gaussian update with Fisher scoring: it approximates the
 posterior over the state by the Gaussian matching its mode and curvature. This
 is genuinely **approximate** Bayesian filtering and is labelled as such
-throughout. Measured against dense quadrature, the one-step predictive
+throughout. Discrete updates use $x=m+Ps$ and linear solves involving
+$I+PH$; they avoid differentiating covariance eigenvectors, preserve a fixed
+semidefinite state support, and remain differentiable at repeated eigenvalues.
+Changing support/rank remains a nonsmooth scientific problem. `filter_jitter`
+regularizes these solves; it does not add stochastic variance to null directions.
+The Fisher curvature differs from the exact observed state Hessian for nonlinear
+observation maps. Measured against dense quadrature, the one-step predictive
 probability is accurate to about `1.2e-3` (Bernoulli) and `4.1e-3`
 (categorical) in the documented reference cases. See
 [VALIDATION.md](VALIDATION.md).
@@ -540,9 +567,9 @@ After fitting:
 
 ```python
 from gbmtoolbox import (
-    convergence_diagnostics,          # did multi-start agree?
-    posterior_hessian_diagnostics,    # is the Laplace approximation sound?
-    prior_preconditioned_information, # what did the data add over the prior?
+    convergence_diagnostics,  # did multi-start agree?
+    posterior_hessian_diagnostics,  # is the Laplace approximation sound?
+    prior_preconditioned_information,  # what did the data add over the prior?
     numerical_local_identifiability,  # are parameters separately determined?
 )
 ```
@@ -560,7 +587,9 @@ relative to the number of trials leaves residuals that understate the noise --
 the familiar gap between $SSE/T$ and $SSE/(T-p)$. The diagnostic recomputes the
 noise from the expected residual energy under the Laplace posterior and reports
 an inflation factor; near 1 the reported SD is fine, at 1.1 or above it is not.
-It changes neither the fit nor its evidence.
+It changes neither the fit nor its evidence. It applies to deterministic latent
+states: with initial-state or process noise the residuals at the predicted
+state also contain latent-state variance, so it returns `valid=False` there.
 The noise correction remains a residual-energy diagnostic: it does not
 re-estimate Gamma hyperparameters, replace the noise posterior, or change
 model evidence. Its inflation factor compares corrected and uncorrected
@@ -592,7 +621,7 @@ with subjects as the first axis; indices are zero based.
 | Input | Main result | Inferential target |
 | --- | --- | --- |
 | `(subjects, models)` | `BMSResult` | Population model frequencies and EP/PXP |
-| Same matrix with `families` | `BMSResult.families` | Aggregated family frequencies and EP/PXP |
+| Same matrix with `families` | `BMSResult.families` | Marginal family frequencies and EP/PXP |
 | `(subjects, models, conditions)` ndarray | `ConditionBMSResult` | Prevalence of equal versus unequal condition tuples |
 | List of group matrices | `GroupBMSResult` | Shared versus separate population frequency profiles |
 
@@ -618,31 +647,63 @@ Without families, the historical GBM prior is preserved: $\alpha_{0k}=1$.
 With $F$ families and family size $K_f$, the default is
 $\alpha_{0k}=1/(FK_f)$ for $k\in f$, so each family has prior mass $1/F$ and
 the total prior count is one. Explicit `alpha0` overrides this default.
-Prior count affects RFX inference and must be reported. The compatibility
-`GroupBMS` adapter uses VBA's one-total-count default even without families.
+Prior count affects RFX inference and must be reported. VBA uses one prior
+count in total even without families; pass `alpha0=np.full(K, 1 / K)` to
+reproduce that.
 
-Model-frequency posterior parameters are aggregated exactly:
-$a_f=\sum_{k\in f}a_k$. The induced family distribution is Dirichlet with
-these parameters; family frequencies are analytically $a_f/\sum_f a_f$,
-and family responsibilities are sums of model responsibilities. Family EP is
-calculated directly from this smaller Dirichlet distribution rather than by
-allocating and summing a million full model-frequency samples.
+The default `family_method="marginal"` first integrates a uniformly selected
+within-family model separately for each subject:
 
-The alternative RFX evidence $F_1$ is a mean-field variational lower bound.
-The model null fixes frequencies to $1/K$. The family null fixes each family's
-total mass to $1/F$ and, additionally, models within that family to $1/K_f$:
+$$L_{s,f}=\operatorname{logsumexp}_{k\in f}(L_{s,k})-\log K_f.$$
+
+RFX inference then uses these family evidences and prior counts
+$\alpha_{0f}=\sum_{k\in f}\alpha_{0k}$. It estimates population **family**
+frequencies without estimating population frequencies of models inside each
+family. This matches the default family-level between-group comparison.
+Duplicating every model in a family leaves its marginal evidence unchanged.
+
+For **two families**, numerical quadrature integrates the frequency posterior:
+
+$$p(r\mid y)\propto r^{a-1}(1-r)^{b-1}
+\prod_s[r\exp(L_{s,0})+(1-r)\exp(L_{s,1})].$$
+
+This posterior is generally not Beta/Dirichlet. Means, variances, responsibilities,
+evidence, and EP are integrated directly. `families.posterior_parameters` is
+therefore `None`; `expected_counts` is the prior plus expected informative-label
+counts, **not** parameters of an exact posterior Dirichlet. `frequency_variance`
+reports the integrated variance, and `method="marginal_binary_quadrature"`
+identifies this calculation. For more than two families, the frequency posterior
+and evidence still use mean-field VB (`method="marginal"`).
+
+To retain the previous analysis use `family_method="aggregate"`. It sums the
+full model-level variational Dirichlet counts $a_f=\sum_{k\in f}a_k$ and
+responsibilities. This is exact aggregation of an **approximate** model posterior,
+not exact family inference. With weak evidence and small asymmetric model prior
+counts, mean-field updates can produce strongly biased family frequencies.
+The aggregate option retains this limitation; use it only with that assumption
+explicitly reported.
+
+The model null fixes model frequencies to $1/K$. The family null fixes total
+family mass to $1/F$ and model mass inside each family to $1/K_f$:
 
 $$F_{0,f}=\sum_s\log\left[\sum_f\sum_{k\in f}
 \frac{\exp(L_{sk})}{FK_f}\right].$$
 
-This is evaluated exactly using stable log-sum-exp. Family BOR is
-$\operatorname{sigmoid}(F_{0,f}-F_1)$ with equal prior odds for null and
-alternative; family PXP is $(1-\mathrm{BOR}_f)\mathrm{EP}_f+\mathrm{BOR}_f/F$.
-This null fixes the within-family model frequencies rather than integrating
-over unknown within-family profiles. It is therefore stronger than a null
-constraining family totals alone. `result.bor`/`null_log_evidence` retain the
-model null; `result.families.bor`/`null_log_evidence` expose the family null.
-Use the family BOR when reporting family PXP or condition-family PXP.
+Family BOR is $\operatorname{sigmoid}(F_{0,f}-F_{1,f})$ under equal hypothesis
+prior odds. $F_{1,f}$ is the integrated two-family evidence or the larger-space
+variational bound; for aggregate mode it is the full-model bound. Family PXP is
+$(1-\mathrm{BOR}_f)\mathrm{EP}_f+\mathrm{BOR}_f/F$.
+The null additionally fixes within-family mixtures; it does not integrate an
+unknown population model profile within each family. Model BOR and family BOR
+remain separate. Use the family BOR to interpret family or condition PXP.
+
+Exactly constant evidence rows contribute an evidence offset but no information
+about frequencies. Their labels are marginalized before the VB updates; they do
+not increase posterior counts. `n_informative_subjects` records the remaining
+rows. This removes the spurious learning from entirely uninformative subjects,
+but **does not remove general mean-field bias for weak nonconstant evidence**.
+In particular model-only BMS (including two models) retains its historical VB
+reports; exact binary integration is used for marginal families and group odds.
 
 `result.families.within[f]` is a separate BMS analysis restricted to family $f$,
 with uniform prior counts totaling one. It is conditional on restricting the
@@ -713,7 +774,7 @@ print(out.log_bayes_factor)  # positive favors different profiles
 
 Following the statistical construction in `VBA_groupBMC_btwGroups`, compare
 $H_=$ (one population-frequency profile for all groups) with $H_{\ne}$
-(independent group-specific profiles). If $F(L)$ is the RFX variational bound:
+(independent group-specific profiles). Let $F(L)$ denote the RFX log evidence (integrated for two comparison categories, a variational bound otherwise):
 
 $$F_= = F(\operatorname{stack}_g L_g),\qquad
 F_{\ne} = \sum_g F(L_g),\qquad
@@ -728,9 +789,10 @@ $$P(H_=\mid y)=\operatorname{sigmoid}
 pooled and each separate analysis. This generalizes VBA's two-group test to
 two or more independent groups. It compares entire frequency profiles, so
 groups can have the same winning model while supporting different profiles.
-There are no group model tuples and no group `xp` or `pxp`. The approximation
-uses differences of variational bounds, whose errors can differ across
-hypotheses; interpret the probability accordingly.
+There are no group model tuples and no group `xp` or `pxp`. For two comparison categories, Gauss-Jacobi quadrature integrates the frequency
+likelihood and `evidence_method="binary_quadrature"`. For larger spaces it is
+`"variational"`: errors in the two bounds may differ and need not cancel.
+Completely uninformative group data preserve `prior_equal` exactly.
 
 Without families, `group_level="auto"` compares model frequencies. With
 families it compares family frequencies, using per-subject family evidences
@@ -747,44 +809,48 @@ family-balanced priors, as VBA's group function does when given families.
 This distinction can change results when groups differ only within a family.
 
 `pooled` and `per_group` retain full model/family reports.
-`comparison_pooled` and `comparison_per_group` identify the fits whose bounds
-were used in the hypothesis comparison. `group_sizes`, `group_names`,
+`comparison_pooled` and `comparison_per_group` retain variational comparison
+reports even when group odds use quadrature. The actual hypothesis evidences are
+`log_evidence_equal` and `log_evidence_different`; the separate
+`variational_log_evidence_*` fields retain the bounds for inspection. `group_sizes`, `group_names`,
 `comparison_level`, and `prior_equal` record the analysis choices. Irrelevant
 subject-specific evidence constants are removed internally when computing
 BOR and group Bayes factors, while reported evidence values retain the original
 constants.
 
-#### Sampling and migration from the supplied script
+#### Exceedance sampling and differences from VBA
 
-EPs for two candidates follow an analytic Beta tail; a single candidate has
+Variational Dirichlet EPs for two candidates follow an analytic Beta tail; a single candidate has
 EP one. Larger spaces use seeded Dirichlet draws in blocks bounded to about
 two million entries. Expected frequencies are analytic. For sampled EPs the
 Monte Carlo standard error is at most $0.5/\sqrt{n_{samples}}$ per entry;
-the default 100,000 draws gives an upper bound about 0.0016. The compatibility
-adapter retains the supplied default of one million draws. There is no full
-million-by-model sample allocation for family aggregation.
+the default 100,000 draws gives an upper bound about 0.0016. There is no
+full draws-by-model sample allocation for family aggregation.
 
 ```python
-from gbmtoolbox import GroupBMS
-out = GroupBMS(L_conditions, options={"families": [[0, 1], [2, 3]]})
-print(out["pxp"])
-groups = GroupBMS([L_patients, L_controls], options={"families": [[0, 1], [2, 3]]})
-print(groups["p_equal"])
+from gbmtoolbox import bms
+
+conditions = bms(L_conditions, families=[[0, 1], [2, 3]])  # subjects x models x conditions
+print(conditions.pxp)
+groups = bms([L_patients, L_controls], families=[[0, 1], [2, 3]])  # one matrix per group
+print(groups.probability_equal)
 ```
 
-Changes from the supplied script:
+Differences from VBA's `VBA_groupBMC`, `VBA_groupBMC_btwConds` and
+`VBA_groupBMC_btwGroups`:
 
-- Family mean frequencies are exact Dirichlet means, and EPs are computed from
-  aggregated posterior counts.
+- Families default to uniform within-family evidence marginalization. Two-family
+  reports integrate the frequency posterior; use `family_method="aggregate"`
+  to recover the previous variational Dirichlet aggregation.
 - The family-BOR constant adjustment is removed. The explicit fixed family
   null is used instead. VBA's source computes its family null with an entropy
   expression based on unweighted model attributions; GBM evaluates the stated
   fixed-profile mixture exactly. Unequal-family results need not match that
   source line for line.
 - Condition BOR is the equal/not_equal family BOR, rather than the model-tuple
-  BOR returned by the script's outer dictionary.
+  BOR.
 - Group tuples are replaced by the pooled/separate frequency test. Group
-  results use `p_equal`/`p_different`; `xp`/`pxp` have been removed for groups.
+  results report `probability_equal`/`probability_different`, not `xp`/`pxp`.
   Native family-level group comparison is explicitly different from VBA's
   full model-frequency test with family-balanced priors; select
   `group_level="models"` for the latter.
@@ -792,10 +858,8 @@ Changes from the supplied script:
   group columns, invalid control values, and excessive tuple counts raise clear
   errors. A single candidate is handled as a degenerate distribution.
 
-The existing 2D API, model-only prior, and first six `BMSResult` fields remain
-available. Binary EP values now use analytic probabilities and therefore may
-differ slightly from previous Monte Carlo estimates even on identical data.
-These features operate on supplied evidence and do not change model fitting,
+Binary EP values use analytic probabilities and therefore may differ slightly
+from Monte Carlo estimates even on identical data. These features operate on supplied evidence and do not change model fitting,
 noise estimation, parameter-scaling defaults, or HBI parameter updates.
 
 Method references:
@@ -812,6 +876,16 @@ toward the group while the group is estimated from the subjects. It updates
 model-specific Gaussian group priors by responsibility-weighted posterior moment
 matching, using the MAP and independently recomputed observed Hessian for each
 refit.
+
+Each sweep checks maximum absolute changes in model frequencies, group-prior
+means, and group-prior covariance entries against `HBIConfig.tol`.
+`convergence_history` records all three. Empty scientific parameter blocks are
+supported. On convergence or exhaustion of `maxiter`, `group_priors` are the
+priors actually used for the returned subject fits. The final proposed update
+is not applied without a subsequent subject refit. A nonconverged result
+remains labeled `converged=False`. This is a numerical consistency fix, not a
+full variational HBI algorithm. Every subject must have a converged optimizer
+run and positive-definite observed Hessian; otherwise HBI raises an error.
 
 ### Differences from the original HBI
 
@@ -839,7 +913,7 @@ the following differ deliberately:
   variational bound.
 - **No free-energy bound.** The original monitors the variational lower bound and
   reports exceedance and protected exceedance probabilities. Convergence here is
-  assessed on changes in model frequency and group means, and no bound is
+  assessed on changes in model frequency, group means, and group covariance, and no bound is
   computed; use `bms` for exceedance probabilities.
 - **Scope.** Group refitting applies to evolution (`theta`) and observation
   (`phi`) parameters only. Process- and observation-noise priors stay at their
@@ -851,12 +925,12 @@ the following differ deliberately:
 ## Reading the result
 
 ```python
-fit.output.parameters        # MAP estimates, subjects x parameters
-fit.output.log_evidence      # Laplace log evidence per subject
-fit.output.latent            # state trajectories and uncertainty
-fit.math.covariance          # posterior covariance, or None if Laplace invalid
-fit.math.hessian             # observed Hessian at the MAP
-fit.math.diagnostics         # per-subject convergence and Laplace status
+fit.output.parameters  # MAP estimates, subjects x parameters
+fit.output.log_evidence  # Laplace log evidence per subject
+fit.output.latent  # state trajectories and uncertainty
+fit.math.covariance  # posterior covariance, or None if Laplace invalid
+fit.math.hessian  # observed Hessian at the MAP
+fit.math.diagnostics  # per-subject convergence and Laplace status
 ```
 
 Check `fit.math.diagnostics` before interpreting `covariance`: it is `None`
@@ -877,6 +951,7 @@ Runnable, commented examples in `gbmtoolbox/examples/`:
 8. `08_filtered_state_model.py` — latent uncertainty from filtering
 9. `09_observation_only.py` — models with no latent dynamics, all three families
 10. `10_observation_noise_correction.py` — is the reported observation noise trustworthy?
+11. `11_family_condition_group_bms.py` — family, paired-condition and between-group model selection
 
 ## References
 
@@ -901,3 +976,40 @@ Background on the Laplace approximation, state-space models and filtering:
 For how each numerical claim here is checked, see [VALIDATION.md](VALIDATION.md).
 
 
+
+
+## Reproducibility and variable runtime
+
+`Config.random_state` controls optimization starts and propagated latent draws.
+Each subject now has separate optimization and uncertainty streams, so changing
+`latent_samples` or requesting propagated reporting cannot change later subjects'
+starts. Appending subjects preserves earlier streams; reordering subjects
+changes which stream is assigned to which subject. The same seed produces a
+new sequence compared with older GBM releases. Nonlinear fits can consequently
+select a different mode. Recorded `starts` permit direct comparison.
+
+When `hbi_config` is omitted, HBI inherits `fit_config.random_state`. An explicit
+`HBIConfig.random_state` takes precedence. Model-specific seeds are stored in
+`HBIResult.model_seeds` and reused across sweeps. `None` deliberately requests
+unseeded draws. BMS EP sampling uses `bms(..., random_state=...)`; prior/posterior
+predictive helpers use their own `random_state` arguments. These do not inherit
+an unrelated fit configuration. Two-family quadrature/group odds have no RNG.
+Data generation and random operations inside user functions remain the user's
+responsibility: evolution/observation functions must be deterministic for fixed
+arguments during fitting.
+
+A seed does not fix runtime. The first JAX call may compile; later calls can
+reuse in-memory or persistent compiled executables. Unless a JAX compilation
+cache directory is already configured (`jax.config` or
+`JAX_COMPILATION_CACHE_DIR`), importing the toolbox sets one at
+`~/.cache/gbmtoolbox/jax`; disable it with
+`jax.config.update("jax_enable_compilation_cache", False)`. Model functions, shapes, dtypes,
+filter settings, process/device initialization, hardware load, and numerical
+thread scheduling also affect timing. Separate cold-process timing from repeated
+warm fits. Use `fit.math.diagnostics[s].timings`, `n_evaluations`, and start
+records to distinguish setup time from different optimizer work. Host result
+conversion synchronizes GBM's recorded inference stages; hand-written JAX timers
+should call `block_until_ready()` before stopping. Numerical results across
+JAX versions or different hardware are not promised to be bitwise identical.
+See [JAX benchmarking](https://docs.jax.dev/en/latest/benchmarking.html) and
+[asynchronous dispatch](https://docs.jax.dev/en/latest/async_dispatch.html).

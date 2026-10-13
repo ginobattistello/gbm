@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from scipy.special import psi
@@ -27,10 +27,15 @@ class HBIConfig:
     random_state: int | None = 42
 
     def __post_init__(self):
-        if self.maxiter < 1:
-            raise ValueError("maxiter must be >= 1")
+        """Validate the stopping rule and the seed."""
+        if isinstance(self.maxiter, (bool, np.bool_)) or not isinstance(self.maxiter, (int, np.integer)) or self.maxiter < 1:
+            raise ValueError("maxiter must be a positive integer")
         if self.tol <= 0:
             raise ValueError("tol must be > 0")
+        if self.random_state is not None and (
+            isinstance(self.random_state, (bool, np.bool_)) or not isinstance(self.random_state, (int, np.integer)) or self.random_state < 0
+        ):
+            raise ValueError("random_state must be a nonnegative integer or None")
 
 
 @dataclass
@@ -50,6 +55,8 @@ class HBIResult:
     converged: bool
     n_iter: int
     method: str = "hierarchical_empirical_bayes_laplace"
+    convergence_history: list[dict] = field(default_factory=list)
+    model_seeds: tuple[int, ...] = ()
 
 
 def _responsibilities(lme, alpha):
@@ -59,6 +66,11 @@ def _responsibilities(lme, alpha):
     r = np.exp(log_r)
     r /= np.sum(r, axis=1, keepdims=True)
     return r
+
+
+def _max_change(a, b) -> float:
+    """Largest absolute elementwise change between two arrays; 0 when empty."""
+    return float(np.max(np.abs(a - b))) if a.size else 0.0
 
 
 def _weighted_block_prior(fit, weights, slc, original_prior: GaussianPrior):
@@ -112,12 +124,16 @@ def hbi_main(data, models, *, fit_config: Config | None = None, hbi_config: HBIC
     else:
         fit_config = replace(fit_config, verbose=False, display=False, latent_uncertainty="none")
     if hbi_config is None:
-        hbi_config = HBIConfig()
+        hbi_config = HBIConfig(random_state=fit_config.random_state)
+    # Explicit HBIConfig seed controls the hierarchical call. Otherwise the
+    # seed is inherited from Config. Each model keeps the same stream between
+    # sweeps, avoiding unrelated restart draws changing as priors are updated.
+    model_seeds = tuple(int(s.generate_state(1)[0]) for s in np.random.SeedSequence(hbi_config.random_state).spawn(len(models)))
 
     group_priors = [m.priors for m in models]
     alpha = np.ones(len(models), dtype=float)
     prev_freq = alpha / alpha.sum()
-    prev_means = [p.mean.copy() for p in group_priors]
+    history = []
     converged = False
     fits = None
     r = np.full((len(data), len(models)), 1.0 / len(models))
@@ -128,10 +144,10 @@ def hbi_main(data, models, *, fit_config: Config | None = None, hbi_config: HBIC
         for k, (model, priors) in enumerate(zip(models, group_priors)):
             # replace() changes only theta/phi priors; Q/R modes and noise priors stay untouched.
             mk = replace(model, priors=priors)
-            fit = individual_fit(data, mk, config=fit_config)
+            fit = individual_fit(data, mk, config=replace(fit_config, random_state=model_seeds[k]))
             for n, diag in enumerate(fit.math.diagnostics):
                 if not diag.laplace_valid:
-                    raise RuntimeError(f"HBI requires valid Laplace curvature: model {k}, subject {n}")
+                    raise RuntimeError(f"HBI requires a converged MAP and valid Laplace curvature: model {k}, subject {n}")
             fits.append(fit)
             lme[:, k] = fit.output.log_evidence
 
@@ -146,16 +162,19 @@ def hbi_main(data, models, *, fit_config: Config | None = None, hbi_config: HBIC
             po = _weighted_block_prior(fit, r[:, k], layout.phi_slice, original_model.priors.observation)
             new_priors.append(Priors(pe, po))
 
-        delta_freq = float(np.max(np.abs(freq - prev_freq)))
-        delta_mean = max(float(np.max(np.abs(p.mean - pm))) for p, pm in zip(new_priors, prev_means))
+        delta_freq = _max_change(freq, prev_freq)
+        delta_mean = max(_max_change(p.mean, old.mean) for p, old in zip(new_priors, group_priors))
+        delta_cov = max(_max_change(p.covariance, old.covariance) for p, old in zip(new_priors, group_priors))
+        history.append({"iteration": it, "frequency_change": delta_freq, "mean_change": delta_mean, "covariance_change": delta_cov})
         if hbi_config.verbose:
-            print(f"HBI iter {it:02d}: max Δfreq={delta_freq:.3g}, max Δgroup-mean={delta_mean:.3g}")
-        group_priors = new_priors
-        if max(delta_freq, delta_mean) <= hbi_config.tol:
+            print(f"HBI iter {it:02d}: max Δfreq={delta_freq:.3g}, max Δmean={delta_mean:.3g}, max Δcov={delta_cov:.3g}")
+        if max(delta_freq, delta_mean, delta_cov) <= hbi_config.tol:
             converged = True
             break
+        if it == hbi_config.maxiter:
+            break
+        group_priors = new_priors
         prev_freq = freq.copy()
-        prev_means = [p.mean.copy() for p in group_priors]
 
     return HBIResult(
         models=list(models),
@@ -166,4 +185,6 @@ def hbi_main(data, models, *, fit_config: Config | None = None, hbi_config: HBIC
         group_priors=group_priors,
         converged=converged,
         n_iter=it,
+        convergence_history=history,
+        model_seeds=model_seeds,
     )

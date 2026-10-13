@@ -13,173 +13,34 @@ Where an analytic answer exists, it is the reference. Where it does not, the
 reference is high-accuracy numerical integration or an exactly solvable special
 case. A code-to-code comparison is never treated as validation.
 
-## Extended BMS validation (2026-10-13)
+## Current status
 
-Validated against GBM base commit `08cca6504b66c92306ccb89843e47bd2a3eb6ff5`.
-Environment: Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0,
-JAX/jaxlib 0.4.38, pytest 8.4.2. The complete suite passes **146 tests**,
-including **32 new BMS cases** in `tests/test_bms_extended.py`.
+| | |
+|---|---|
+| Python | 3.11.14 |
+| NumPy | 2.4.6 |
+| SciPy | 1.17.1 |
+| JAX / jaxlib | 0.10.2 |
+| Platform | macOS arm64 |
+| Date | 2026-10-13 |
 
-The statistical references are independent mathematical cases:
-
-- **RFX evidence:** finite log-evidence matrices with known model labels to
-  floating-point precision. For counts $n$ and Dirichlet prior $a_0$, the exact
-  evidence is $\log B(a_0+n)-\log B(a_0)$. Both pooled and separate group
-  variational bounds reproduce this integral in the known-label case.
-- **Group hypothesis probability:** compare the pooled Dirichlet integral with
-  the product of independent group integrals and apply the specified prior odds.
-  Tests cover unequal group sizes, more than two groups, nonuniform priors,
-  and different frequency profiles sharing the same winning model.
-- **Binary EP:** compare directly with the Beta survival probability at 0.5.
-- **Family aggregation:** Dirichlet sums have parameters equal to the summed
-  model parameters. Compare analytic family means and EP with an independently
-  sampled full Dirichlet posterior. The sampling check uses fixed seed and
-  tolerances 0.006 (mean) and 0.009 (EP) for 50,000 draws.
-- **Family null:** compare stable log-sum-exp evidence with a directly evaluated
-  normalized finite mixture, including unequal family sizes. Check the BOR/PXP
-  formula and separation between model and family null risks.
-- **Condition tuples:** direct products of per-condition likelihoods, represented
-  as sums of log evidences. Known unequal labels provide an analytic Dirichlet
-  tuple evidence reference. Test tuple membership, balanced hypothesis prior
-  masses, family equality with different within-family models, factorial axis
-  masks, one-condition fallback, and vacuous one-family equality.
-- **Family group comparison:** explicitly marginalize uniform within-family
-  choices with `logsumexp - log(family size)` and compare with the corresponding
-  two-category frequency test. Verify that within-family group differences
-  are separated from differences in family frequencies.
-- **Numerical/API checks:** subject-specific evidence-shift invariance, retained
-  native 2D prior/result interface, dictionary compatibility, seeded sampling,
-  invalid evidence/partitions/controls, and tuple guards before allocation.
-
-`gbmtoolbox/dev/14_bms_families_conditions_groups.py` reports:
-
-| Reference | Absolute error |
-| --- | ---: |
-| Shared-frequency evidence | `0.000e+00` |
-| Separate-frequency evidence | `1.776e-15` |
-| Group hypothesis probability | `4.163e-17` |
-| Binary EP | `0.000e+00` |
-| Family-null mixture evidence | `2.220e-16` |
-| Known condition-tuple evidence | `2.665e-15` |
-
-Criterion: every analytic reference error below `1e-10`. All pass. The existing
-Gamma evidence/Bayes-factor scientific script also passes, as do the existing
-and new BMS examples. Recorded outputs are in `docs/BMS_VALIDATION_RESULTS.json`
-and `docs/BMS_TEST_RESULTS.txt`.
-
-These checks establish correctness in the reference cases, not exactness of
-general mean-field RFX evidence. General group probabilities use differences
-of variational bounds, and their approximation errors need not cancel.
-VBA-style constructions were checked against the official MATLAB sources;
-MATLAB itself was not executed. The exact family-null mixture and native
-family-only group comparison are deliberate differences described in the
-manual. No numerical equivalence to the supplied group-tuple method is claimed.
-
-Run the relevant checks:
-
-```bash
-python -m pytest -q
-python gbmtoolbox/dev/14_bms_families_conditions_groups.py
-python gbmtoolbox/examples/11_family_condition_group_bms.py
-```
+**Automated suite: 174 passed, 0 failed. Reference scripts: 15 of 15 finish;
+the 14 with a reference answer pass, and script 13 reports timings only.**
+All 11 tutorials in `gbmtoolbox/examples/` also run to completion. There is no
+CI configuration in the repository; the results above are from a local run.
 
 ## Running all checks
 
 ```bash
-python -m pytest -q                          # merge gate
-for f in gbmtoolbox/dev/*.py; do python "$f"; done   # scientific layer
+# merge gate; run the HBI/predictive file on its own to bound peak memory
+python -m pytest -q --ignore=tests/test_predictive_bms_hbi.py
+python -m pytest -q tests/test_predictive_bms_hbi.py
+# scientific layer
+for f in gbmtoolbox/dev/*.py; do python "$f"; done
 ```
 
-## Environment for the results below
-
-| | |
-|---|---|
-| Python | 3.12.12 |
-| NumPy | 2.4.2 |
-| SciPy | 1.17.1 |
-| JAX / jaxlib | 0.11.0 |
-| Platform | Darwin arm64 |
-| Date | 2026-09-19 |
-
-**Automated suite: 51 passed, 0 failed. Reference scripts: 10 of 10 pass.**
-
-CI additionally runs the suite on Python 3.10, 3.11, 3.12 and 3.13.
-
-## Performance update validation
-
-The results above describe the historical validation environment. The
-2026-10-13 performance update was checked separately on Linux x86_64, Python
-3.12.14, NumPy 2.2.6, SciPy 1.15.3, and JAX/jaxlib 0.4.38 on CPU.
-All 12 existing scientific reference scripts pass. Recorded outputs are in
-`docs/REFERENCE_RESULTS.json`. The complete suite passes **114 tests**, including 18 new tests in
-`tests/test_performance_paths.py`.
-
-The new checks cover:
-
-- Vectorized Gaussian, Bernoulli, and categorical observation-only likelihoods,
-  gradients, and Hessians against the original sequential formulas, with and
-  without dictionary inputs. Absolute/relative tolerances are at most `2e-11`.
-- Scalar, fixed diagonal, estimated diagonal, correlated full, and callable
-  Gaussian covariance paths against the normalized dense Gaussian likelihood.
-- Scaled MAPs against the analytic linear Gaussian regression posterior with a
-  correlated prior. Returned Hessians match `X.T @ X / variance + prior_precision`
-  to `1e-10`; scaled/unscaled covariance and evidence agree to `1e-12`/`1e-8` in
-  this case. Bound-constrained fits preserve box bounds, and fixed parameters
-  retain zero posterior variance.
-- Equality of the objective and original-coordinate Hessian at the same
-  parameter point under both scaled and unscaled optimizer coordinates.
-- Compilation reuse after Gaussian and exact Gamma hyperparameters change,
-  compared with an independently compiled equivalent model. This detects stale
-  prior values in cached executables.
-- One preparation per subject, finite stage timings and evaluation counts, and
-  retention of filtering when an identity state is uncertain.
-
-The existing analytic family tests, linear Gaussian filtering checks,
-discrete filtering quadrature checks, and analytic Gamma evidence/Bayes-factor
-tests remain part of the full suite. Code-to-code agreement supplements these
-mathematical references; it is not used as their replacement.
-
-Three defects already present at base commit
-`c28a46f294d850db99db67eac9ec957ed9a9ed68` were corrected while making the suite
-green: missing documented prior metadata, Gaussian-proxy draws in the Gamma
-prior-predictive path, and Gaussian-proxy curvature subtraction in the data
-information diagnostic. Exact prior density, MAP likelihood, and Laplace
-evidence were already correct; these fixes affect metadata, prior-predictive
-simulation, and information reporting, respectively. The information check uses
-the analytic likelihood curvature `2 * SSE * exp(-2*rho)` with exact prior
-curvature `4 * rate * exp(-2*rho)` subtracted from the posterior Hessian.
-
-### Before/after timing experiment
-
-`gbmtoolbox/dev/13_fit_performance.py` was run against the base commit and this
-update in separate processes. Each example used 2,000 trials, two observation
-coefficients, one initialization, and no latent propagation. Gaussian noise
-was estimated under the exact default prior. The base search used original
-coordinates; the updated search used its default scaling. Persistent disk
-compilation caching was disabled. Warm results are medians of five further
-complete fits using the same model object and array shapes. Runs were sequential
-on the same machine; no timing threshold is asserted in tests.
-
-| Outcome | Base first fit (s) | Updated first fit (s) | Base warm fit (s) | Updated warm fit (s) | Warm speedup |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Gaussian | 1.466 | 0.648 | 0.428 | 0.00701 | 61.0x |
-| Bernoulli | 0.567 | 0.409 | 0.179 | 0.00512 | 35.0x |
-| Categorical | 0.772 | 0.415 | 0.227 | 0.00523 | 43.4x |
-
-Maximum fitted-parameter differences were `4.90e-7` (Gaussian) and below
-`2e-16` (discrete examples). Absolute log-evidence differences were `1.47e-6`
-and zero, respectively, consistent with the different numerical search path
-for estimated Gaussian noise. These examples do not establish a speedup for
-nonlinear dynamics, stochastic filtering, different hardware, or your real
-model. Cold and warm timing differences must be reported separately.
-
-Raw measurements are in `docs/PERFORMANCE_RESULTS.json`. To reproduce:
-
-```bash
-python gbmtoolbox/dev/13_fit_performance.py --trials 2000 --repeats 5
-# Optional comparison of execution changes without optimizer scaling:
-python gbmtoolbox/dev/13_fit_performance.py --trials 2000 --repeats 5 --unscaled
-```
+Each section below names its script, the question it answers, the reference,
+the pass criterion and the measured result.
 
 ---
 
@@ -362,31 +223,28 @@ parameters enter the full posterior rather than being profiled out.
 
 ## 10. Default observation-noise prior against the analytic posterior mode
 
-`08_default_observation_noise.py`
+`10_default_observation_noise.py`
 
 **Question.** When `observation_covariance` is omitted, a Gaussian model
-estimates $R$ under a default $\rho \sim \mathcal{N}(0, 2)$ prior on
-$\rho = \log \sigma$. Does the fitted value match what that model implies
-analytically, and how far does the prior bend it away from the data?
+estimates $R$ under the default prior: VBA's $\mathrm{Ga}(1,1)$ on the
+observation precision $\lambda=\sigma^{-2}$, evaluated exactly in
+$\rho=\log\sigma$. Does the fitted value match what that model implies
+analytically?
 
-**Reference.** For a constant-mean Gaussian with the mean fixed, the log
-posterior in $\rho$ is closed-form,
+**Reference.** For a constant-mean Gaussian with the mean fixed and
+$S=\sum_t (y_t-\mu)^2$, the log posterior in $\rho$ with a
+$\mathrm{Ga}(a,b)$ precision prior is
 
-$$L(\rho) = -T\rho - \frac{S}{2e^{2\rho}} - \frac{(\rho - m_0)^2}{2v}, \qquad S = \sum_t (y_t - \mu)^2,$$
+$$L(\rho) = -(T+2a)\rho - \left(\tfrac{S}{2}+b\right)e^{-2\rho} + \text{const},$$
 
-so the posterior mode solves $(\rho - m_0) + v\,(T - S e^{-2\rho}) = 0$, where
-$\mathcal{N}(m_0, v)$ is the default prior — VBA's $\mathrm{Ga}(1,1)$ prior on
-observation precision, moment-matched onto the log scale. That root is found
-independently by Brent's method; the unpenalised MLE $\sigma^2 = S/T$ is
-reported alongside it so the prior's influence is visible.
+so the mode is $\hat\sigma^2=(S+2b)/(T+2a)$, i.e.
+$\hat\sigma=\sqrt{(1+S/2)/(1+T/2)}$ at $a=b=1$. This is the exponentiated
+log-SD mode, not the mode or mean of $\sigma$ in its own coordinate.
 
 **Criterion.** Relative error above `1e-3` against the analytic mode fails.
 
-**Result.** Worst relative error `7.1e-09` across four cases spanning
-$\sigma \in [0.3, 2.5]$ and $T \in [200, 800]$ — the estimator reproduces the
-analytic posterior mode. Shrinkage against the unpenalised MLE is `+3.95%` at
-$T = 50$, `+0.94%` at $T = 200$ and `+0.18%` at $T = 1000$: the default prior
-is weakly informative and its influence vanishes with data.
+**Result.** Worst relative error `3.3e-08` across four cases spanning
+$\sigma \in [0.3, 2.5]$ and $T \in [200, 800]$.
 
 ---
 
@@ -421,6 +279,143 @@ counts and shrinks as $T$ grows.
 
 ---
 
+## 12. Exact Gamma noise prior: density, evidence and Bayes factors
+
+`12_gamma_precision_evidence.py`
+
+**Question.** With the default `Gamma(1, 1)` precision prior evaluated in
+`log_observation_sd`, are the MAP, the observed Hessian and the Laplace
+evidence correct, and do Bayes factors and BMS inputs inherit that accuracy?
+
+**Reference.** With fixed predictions the Gamma precision integrates
+analytically: the exact log-SD posterior mode, its curvature, and the exact
+marginal likelihood are closed form. Laplace evidence is not exact; it is
+compared with its known Stirling-series error, not with the exact evidence.
+
+**Criterion.** Assertions on the mode, Hessian and predicted Laplace error, on
+a Bayes factor between two such models, and on BMS invariance to a common
+evidence shift.
+
+**Result.** Over $T \in \{1, 5, 25, 100, 1000\}$ the largest errors are
+`7.6e-08` (mode), `1.5e-07` (relative Hessian) and `7.6e-08` (Laplace minus
+its predicted error). The log Bayes factor error is `5.3e-09`; the BMS
+common-shift error is `6.4e-22`.
+
+---
+
+## 13. Fit timings
+
+`13_fit_performance.py`
+
+**Question.** How long do cold (first, compiling) and warm (repeated) fits take
+for an observation-only model with each outcome family?
+
+**Reference.** None: this script reports timings and asserts nothing about
+them. It uses unscaled optimizer coordinates, the library default; `--scaled`
+times `Config(parameter_scaling=True)`. Disk compilation caching is disabled,
+so cold times include compilation.
+
+**Result.** A before/after comparison was made on 2026-10-13 against commit
+`c28a46f` on Linux x86_64 (Python 3.12.14, NumPy 2.2.6, SciPy 1.15.3,
+JAX 0.4.38, CPU), with 2,000 trials, two observation coefficients, one start,
+estimated Gaussian noise under the default prior, and parameter scaling
+enabled. Warm results are medians of five further fits on the same model.
+
+| Outcome | Before, first fit (s) | After, first fit (s) | Before, warm (s) | After, warm (s) | Warm speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gaussian | 1.466 | 0.648 | 0.428 | 0.00701 | 61.0x |
+| Bernoulli | 0.567 | 0.409 | 0.179 | 0.00512 | 35.0x |
+| Categorical | 0.772 | 0.415 | 0.227 | 0.00523 | 43.4x |
+
+Maximum fitted-parameter differences were `4.90e-7` (Gaussian) and below
+`2e-16` (discrete). Absolute log-evidence differences were `1.47e-6` and zero.
+These examples do not establish a speedup for nonlinear dynamics, stochastic
+filtering, other hardware, or a particular user model. To reproduce:
+
+```bash
+python gbmtoolbox/dev/13_fit_performance.py --trials 2000 --repeats 5
+python gbmtoolbox/dev/13_fit_performance.py --trials 2000 --repeats 5 --scaled
+```
+
+The same update is covered by `tests/test_performance_paths.py`: vectorized
+observation-only likelihoods, gradients and Hessians against the sequential
+formulas (tolerance `2e-11`); every Gaussian covariance path against the dense
+normalized likelihood; scaled fits against the analytic linear-Gaussian
+posterior (Hessian to `1e-10`, covariance and evidence to `1e-12`/`1e-8`);
+and compilation reuse after prior values change, compared with an independently
+compiled model, so stale prior values in cached executables are detected.
+
+---
+
+## 14. Family, condition and group model selection
+
+`14_bms_families_conditions_groups.py`
+
+**Question.** Are the random-effects evidences, group hypothesis probabilities,
+exceedance probabilities, family nulls and condition-tuple evidences correct?
+
+**Reference.** Independent mathematical cases:
+
+- **RFX evidence.** With effectively known model labels, counts $n$ and
+  Dirichlet prior $a_0$, the evidence is $\log B(a_0+n)-\log B(a_0)$. Pooled
+  and separate group bounds must reproduce it.
+- **Group hypothesis probability.** The pooled Dirichlet integral against the
+  product of independent group integrals, under the stated prior odds.
+- **Binary exceedance.** The Beta survival probability at one half.
+- **Family null.** A directly evaluated, normalized finite mixture, including
+  unequal family sizes.
+- **Condition tuples.** Direct products of per-condition likelihoods.
+
+**Criterion.** Every absolute error below `1e-10`.
+
+**Result.**
+
+| Reference | Absolute error |
+| --- | ---: |
+| Shared-frequency evidence | `7.8e-14` |
+| Separate-frequency evidence | `1.5e-13` |
+| Group hypothesis probability | `1.7e-15` |
+| Binary exceedance | `0.0` |
+| Family-null mixture evidence | `2.2e-16` |
+| Known condition-tuple evidence | `2.7e-15` |
+
+These establish correctness in the reference cases, not exactness of general
+mean-field RFX evidence: general group probabilities use differences of
+variational bounds, whose approximation errors need not cancel. VBA-style
+constructions were checked against the VBA MATLAB sources; MATLAB itself was
+not run. `tests/test_bms_extended.py` adds sampled checks of family
+aggregation, factorial condition axes, offset invariance and input validation.
+
+---
+
+## 15. Weak-evidence model selection and multistate filter derivatives
+
+`15_reliability_reproducibility.py`
+
+**Question.** When evidence barely distinguishes two candidates, do the
+two-family frequency posterior and the two-group hypothesis probability stay
+exact rather than drifting under the mean-field approximation? And are the
+gradient and Hessian of a two-state filter likelihood with an isotropic
+covariance (repeated eigenvalues) finite and correct?
+
+**Reference.** Direct Beta-weighted quadrature of the frequency likelihood for
+the BMS cases; an exactly uninformative pair of groups must return the prior
+probability. Central finite differences for the filter derivatives.
+
+**Criterion.** BMS errors below `1e-10`; finite-difference agreement within
+`1e-6` (gradient) and `2e-5` (Hessian).
+
+**Result.** All BMS errors are at most `4.6e-16`; the uninformative group
+probability is exact. Filter derivative errors are `2.7e-09` (gradient) and
+`2.1e-08` (Hessian).
+
+Scope: exact integration is restricted to two marginal families and
+two-category group odds. Model-only BMS reports, aggregate families and larger
+group spaces keep their variational approximations. The discrete filter uses
+local Fisher curvature, not exact nonlinear state-posterior curvature.
+
+---
+
 ## Adding a check
 
 Anything that introduces a new numerical approximation needs both layers:
@@ -448,5 +443,6 @@ Numerical rules the implementation holds itself to:
 - A finite MAP and a valid Laplace approximation are separate outcomes.
 - Discrete-state filtering is approximate and must stay labelled as such.
 - Modeller programming errors should surface, not be silently absorbed.
+
 
 

@@ -16,7 +16,7 @@ from .diagnostics import (
 )
 from .hbi import HBIConfig, HBIResult, hbi_main
 from .individual_fit import FitResult, individual_fit
-from .model_selection import BMSResult, ConditionBMSResult, FamilyBMSResult, GroupBMS, GroupBMSResult, bms, bms_conditions, bms_groups
+from .model_selection import BMSResult, ConditionBMSResult, FamilyBMSResult, GroupBMSResult, bms, bms_conditions, bms_groups
 from .optimization import Config
 from .parameters import ParameterLayout, observation_noise_prior_from_scale, robust_scale
 from .predictive import posterior_predictive, prior_predictive, simulate_subject
@@ -27,13 +27,12 @@ from .state_model import StateModel
 __all__ = [
     "BMSResult",
     "ConditionBMSResult",
-    "FamilyBMSResult",
-    "GroupBMS",
-    "GroupBMSResult",
     "Config",
+    "FamilyBMSResult",
     "FitResult",
     "GammaPrecisionPrior",
     "GaussianPrior",
+    "GroupBMSResult",
     "HBIConfig",
     "HBIResult",
     "ObservationNoiseCorrection",
@@ -59,5 +58,4 @@ __all__ = [
     "simulate_subject",
 ]
 
-__version__ = "0.1.0"
-
+__version__ = "0.2.0.dev0"

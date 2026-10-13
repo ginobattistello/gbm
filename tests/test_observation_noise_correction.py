@@ -159,3 +159,22 @@ def test_correction_does_not_change_the_fit():
     assert np.array_equal(fit.output.parameters, before_params)
     assert np.array_equal(fit.output.log_evidence, before_evidence)
     assert np.array_equal(fit.output.observation_noise_sd, before_sd)
+
+
+def test_stochastic_latent_state_is_not_corrected():
+    """Residuals at the predicted state contain state variance, not only R."""
+    from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit, observation_noise_correction
+
+    rng = np.random.default_rng(5)
+    model = StateModel(
+        evolution=lambda x, theta, u_t, y_t: theta[0] * x,
+        observation=lambda x, phi, u_t: x[0],
+        priors=Priors(GaussianPrior([0.8], [0.1]), GaussianPrior.empty()),
+        initial_state=[0.0],
+        initial_state_covariance=1.0,
+        process_covariance=0.2,
+    )
+    fit = individual_fit([{"y": rng.normal(size=30), "u": None}], model, config=Config(num_init=1, verbose=False))
+    out = observation_noise_correction(fit)
+    assert not out.valid
+    assert out.corrected_sd.size == 0

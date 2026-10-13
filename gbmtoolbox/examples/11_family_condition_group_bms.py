@@ -7,7 +7,7 @@ All evidence arrays are subjects first; family indices are zero based.
 
 import numpy as np
 
-from gbmtoolbox import GroupBMS, bms, bms_conditions, bms_groups
+from gbmtoolbox import bms, bms_conditions, bms_groups
 
 rng = np.random.default_rng(42)
 families = [[0, 1], [2, 3]]
@@ -29,14 +29,17 @@ print("best tuple:", conditions.best[0].models)
 # Independent groups can have different numbers of subjects.
 L_control = rng.normal(-20, 1, (24, 4))
 L_control[:, 2:] += 3
-groups = bms_groups([L, L_control], families=families, family_names=names,
-                    group_names=["patients", "controls"], n_samples=10000)
+groups = bms_groups([L, L_control], families=families, family_names=names, group_names=["patients", "controls"], n_samples=10000)
 print("group comparison level:", groups.comparison_level)
 print("P(shared family frequencies):", groups.probability_equal)
 print("P(separate family frequencies):", groups.probability_different)
 
-# Compatibility with the supplied dictionary-style interface.
-legacy = GroupBMS(L_paired, options={"families": families, "family_names": names}, n_samples=10000)
-print("dictionary condition PXP:", legacy["pxp"])
-legacy_groups = GroupBMS([L, L_control], options={"families": families}, n_samples=10000)
-print("dictionary group P(equal):", legacy_groups["p_equal"])
+# bms() dispatches on the input shape: a 3D array runs the paired-condition
+# analysis and a list of 2D arrays the group comparison.
+paired = bms(L_paired, families=families, family_names=names, n_samples=10000)
+print("dispatched condition PXP:", paired.pxp)
+
+# Without families the native prior is one count per model. VBA instead uses
+# one count in total; pass it explicitly to reproduce that analysis.
+grouped = bms([L, L_control], alpha0=np.full(4, 1 / 4), n_samples=10000)
+print("model-level P(equal), VBA prior:", grouped.probability_equal)

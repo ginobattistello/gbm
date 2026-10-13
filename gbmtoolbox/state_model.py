@@ -12,10 +12,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from .families import get_family
+from .optimization import Config
 from .parameters import ParameterLayout, build_parameter_layout
-from .priors import GaussianPrior, Priors, covariance_matrix
+from .priors import GammaPrecisionPrior, GaussianPrior, Priors, covariance_matrix
 
-Family = str
 _EVALUATOR_CACHE = {}
 
 
@@ -30,10 +30,18 @@ def _static_key(value):
 
 
 def filter_settings(config=None):
-    """Keep historical standalone defaults; fitting passes its Config."""
+    """Filter settings as a hashable tuple; ``None`` means the ``Config`` defaults.
+
+    Standalone evaluation and fitting therefore run the same filter unless a
+    different ``Config`` is passed explicitly.
+    """
     if config is None:
-        return (8, 1e-8, 1.0, 1e-9)
+        config = _DEFAULT_CONFIG
     return (int(config.filter_max_iter), float(config.filter_tol), float(config.filter_damping), float(config.filter_jitter))
+
+
+_DEFAULT_CONFIG = Config(verbose=False)
+_DEFAULT_FILTER_SETTINGS = filter_settings()
 
 
 def compiled_evaluator(model, config=None):
@@ -41,64 +49,44 @@ def compiled_evaluator(model, config=None):
     settings = filter_settings(config)
     key = (model.execution_key, settings)
     if key not in _EVALUATOR_CACHE:
+
         def evaluate(parameters, prepared_data):
-            return model.evaluate_jax(parameters, prepared_data, filter_max_iter=settings[0], filter_tol=settings[1],
-                                      filter_damping=settings[2], filter_jitter=settings[3])
+            """Full model evaluation with the filter settings fixed at compile time."""
+            return model.evaluate_jax(
+                parameters, prepared_data, filter_max_iter=settings[0], filter_tol=settings[1], filter_damping=settings[2], filter_jitter=settings[3]
+            )
+
         _EVALUATOR_CACHE[key] = jax.jit(evaluate)
     return _EVALUATOR_CACHE[key]
 
 
-def trial_input(u: Any, t: int, T: int):
-    """Host-side extraction of modeller-defined inputs for trial ``t``."""
+def _checked_input(value, T: int, label: str) -> np.ndarray:
+    """Check one input array is numeric and, unless scalar, has ``T`` trials."""
+    arr = np.asarray(value)
+    if arr.dtype.kind not in "biufc":
+        raise TypeError(f"{label} must be numeric/bool for the JAX backend")
+    if arr.ndim and arr.shape[0] != T:
+        raise ValueError(f"{label} has first dimension {arr.shape[0]}, expected {T}")
+    return arr
+
+
+def _map_inputs(u: Any, T: int, fn):
+    """Apply ``fn`` to every checked input array, preserving a dict structure."""
     if u is None:
         return None
     if isinstance(u, dict):
-        out = {}
-        for key, value in u.items():
-            arr = np.asarray(value)
-            if arr.dtype.kind not in "biufc":
-                raise TypeError(f"input field {key!r} must be numeric/bool for the JAX backend")
-            if arr.ndim == 0:
-                out[key] = value
-            else:
-                if arr.shape[0] != T:
-                    raise ValueError(f"input field {key!r} has first dimension {arr.shape[0]}, expected {T}")
-                out[key] = value[t]
-        return out
-    arr = np.asarray(u)
-    if arr.dtype.kind not in "biufc":
-        raise TypeError("trial input must be numeric/bool for the JAX backend")
-    if arr.ndim == 0:
-        return u
-    if arr.shape[0] != T:
-        raise ValueError(f"trial input has first dimension {arr.shape[0]}, expected {T}")
-    return u[t]
+        return {key: fn(_checked_input(value, T, f"input field {key!r}")) for key, value in u.items()}
+    return fn(_checked_input(u, T, "trial input"))
+
+
+def trial_input(u: Any, t: int, T: int):
+    """Host-side extraction of modeller-defined inputs for trial ``t``."""
+    return _map_inputs(u, T, lambda arr: arr if arr.ndim == 0 else arr[t])
 
 
 def _prepare_u(u: Any, T: int):
     """Convert trial inputs to fixed-shape JAX arrays, checking lengths."""
-    if u is None:
-        return None
-    if isinstance(u, dict):
-        out = {}
-        for key, value in u.items():
-            arr = np.asarray(value)
-            if arr.dtype.kind not in "biufc":
-                raise TypeError(f"input field {key!r} must be numeric/bool for the JAX backend")
-            if arr.ndim == 0:
-                arr = np.broadcast_to(arr, (T,))
-            elif arr.shape[0] != T:
-                raise ValueError(f"input field {key!r} has first dimension {arr.shape[0]}, expected {T}")
-            out[key] = jnp.asarray(arr)
-        return out
-    arr = np.asarray(u)
-    if arr.dtype.kind not in "biufc":
-        raise TypeError("trial input must be numeric/bool for the JAX backend")
-    if arr.ndim == 0:
-        arr = np.broadcast_to(arr, (T,))
-    elif arr.shape[0] != T:
-        raise ValueError(f"trial input has first dimension {arr.shape[0]}, expected {T}")
-    return jnp.asarray(arr)
+    return _map_inputs(u, T, lambda arr: jnp.asarray(np.broadcast_to(arr, (T,)) if arr.ndim == 0 else arr))
 
 
 def prepare_subject_data(subject_data: dict):
@@ -149,7 +137,7 @@ class StateModel:
 
     evolution: Callable | None = None
     observation: Callable | None = None
-    family: Family = "gaussian"
+    family: str = "gaussian"
     priors: Priors | None = None
     #: Latent state on the first trial.  Observation-only models can leave this
     #: at its default: with no evolution the state never changes, and an
@@ -161,13 +149,14 @@ class StateModel:
     process_covariance: object | None = None
     observation_covariance: object | None = None
     process_noise_prior: GaussianPrior | None = None
-    observation_noise_prior: GaussianPrior | None = None
+    observation_noise_prior: GaussianPrior | GammaPrecisionPrior | None = None
     observation_dim: int | None = None
     state_names: Sequence[str] | None = None
     name: str | None = None
     _observation_only: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        """Validate the specification and normalise family, state and names."""
         if self.observation is None:
             raise ValueError("an observation function is required")
         if self.priors is None:
@@ -288,15 +277,21 @@ class StateModel:
         """
         if type(self) is not StateModel:
             return (type(self), id(self))
-        return (type(self), id(self.evolution), id(self.observation), self.family, self._observation_only,
-                _static_key(self.initial_state), _static_key(self.initial_state_covariance),
-                _static_key(self.process_covariance), _static_key(self.observation_covariance),
-                self.n_theta, self.n_phi, self.n_state, self.resolved_observation_dim)
-
-    def split_parameters(self, parameters):
-        """Backward-compatible split returning only ``theta, phi``."""
-        p = parameters
-        return p[self.parameter_layout.theta_slice], p[self.parameter_layout.phi_slice]
+        return (
+            type(self),
+            id(self.evolution),
+            id(self.observation),
+            self.family,
+            self._observation_only,
+            _static_key(self.initial_state),
+            _static_key(self.initial_state_covariance),
+            _static_key(self.process_covariance),
+            _static_key(self.observation_covariance),
+            self.n_theta,
+            self.n_phi,
+            self.n_state,
+            self.resolved_observation_dim,
+        )
 
     def unpack_parameters(self, parameters):
         """Split a fitted vector into ``(theta, phi, log_process_sd, log_observation_sd)``."""
@@ -432,6 +427,7 @@ class StateModel:
         y, u = prepared_data["y"], prepared_data["u"]
 
         def trial(y_t, u_t):
+            """Score one independent trial and return its prediction."""
             eta = jnp.atleast_1d(self.observation(x, phi, u_t))
             R = self.observation_covariance_jax(phi, rho_r, u_t, eta.shape[0]) if self.family == "gaussian" else None
             return self.observation_log_prob_jax(y_t, eta, phi, rho_r, u_t, R), family.mean(eta, R)
@@ -440,19 +436,35 @@ class StateModel:
             loglik, predictions = jax.vmap(lambda y_t: trial(y_t, None))(y)
         else:
             loglik, predictions = jax.vmap(trial)(y, u)
-        return {"loglik": loglik, "prediction": predictions,
-                "states": jnp.broadcast_to(x, (y.shape[0], self.n_state)),
-                "state_covariance": jnp.zeros((y.shape[0], self.n_state, self.n_state), dtype=jnp.float64)}
+        return {
+            "loglik": loglik,
+            "prediction": predictions,
+            "states": jnp.broadcast_to(x, (y.shape[0], self.n_state)),
+            "state_covariance": jnp.zeros((y.shape[0], self.n_state, self.n_state), dtype=jnp.float64),
+        }
 
     def evaluate_jax(
-        self, parameters, prepared_data, *, filter_max_iter: int = 8, filter_tol: float = 1e-8, filter_damping: float = 1.0, filter_jitter: float = 1e-9
+        self,
+        parameters,
+        prepared_data,
+        *,
+        filter_max_iter: int | None = None,
+        filter_tol: float | None = None,
+        filter_damping: float | None = None,
+        filter_jitter: float | None = None,
     ):
         """Evaluate the model in JAX, filtering only when the state is stochastic.
 
         This is the single entry point the likelihood, the optimiser and the
         Jacobian-based diagnostics all go through, which is why differentiating
-        it propagates correctly through the latent trajectory.
+        it propagates correctly through the latent trajectory. Filter settings
+        left as ``None`` take the ``Config`` defaults.
         """
+        default_iter, default_tol, default_damping, default_jitter = _DEFAULT_FILTER_SETTINGS
+        filter_max_iter = default_iter if filter_max_iter is None else filter_max_iter
+        filter_tol = default_tol if filter_tol is None else filter_tol
+        filter_damping = default_damping if filter_damping is None else filter_damping
+        filter_jitter = default_jitter if filter_jitter is None else filter_jitter
         if self.has_state_uncertainty():
             from .filtering import nonlinear_state_filter_jax
 
@@ -482,4 +494,3 @@ class StateModel:
     def __call__(self, parameters, subject_data):
         """Per-trial log-likelihood, so the model can be used as a plain function."""
         return self.evaluate(parameters, subject_data)["loglik"]
-

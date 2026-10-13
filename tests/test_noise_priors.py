@@ -14,15 +14,16 @@ def test_scale_based_noise_prior_tracks_data_scale():
     rng = np.random.default_rng(2)
     for scale in (0.05, 1.0, 50.0):
         prior = observation_noise_prior_from_scale(rng.normal(0.0, scale, 2000))
-        # centred near log(scale), up to the Gamma moment-matching offset
+        # log-SD prior mean is log(scale) + (log(nu0/2) - digamma(nu0/2)) / 2
         assert prior.mean[0] == pytest.approx(np.log(scale) + 0.2886, abs=0.15)
 
 
-def test_scale_based_noise_prior_handles_degenerate_outcome():
-    # A constant outcome carries no scale information: fall back to the
-    # neutral centre rather than log(0) = -inf.
-    assert observation_noise_prior_from_scale(np.zeros(10)).mean[0] == 0.0
-    assert observation_noise_prior_from_scale(np.array([3.0])).mean[0] == 0.0
+def test_scale_based_noise_prior_rejects_degenerate_outcome():
+    # A constant outcome carries no scale information: ask for prior_scale
+    # rather than inventing a centre.
+    for y in (np.zeros(10), np.array([3.0])):
+        with pytest.raises(ValueError, match="prior_scale"):
+            observation_noise_prior_from_scale(y)
 
 
 def test_prior_sample_size_controls_prior_strength():
@@ -81,20 +82,29 @@ def test_scaled_noise_prior_recovers_sd_on_large_scale_data():
     # within 40% at only 25 trials, without the default prior dragging it to ~1
     assert fit.output.observation_noise_sd[0, 0] == pytest.approx(true_sd, rel=0.4)
 
+
 def test_default_noise_prior_is_exact_vba_gamma():
-    """The default has the same log moments but preserves Gamma quantiles."""
+    """The scale-based helper reproduces the exact default at s0=1, nu0=2."""
     from gbmtoolbox import GammaPrecisionPrior
     from gbmtoolbox.parameters import default_observation_noise_prior
 
     default = default_observation_noise_prior(1)
-    assert isinstance(default, GammaPrecisionPrior)
     vba = observation_noise_prior_from_scale(prior_scale=1.0, prior_sample_size=2.0)
-
-    assert default.mean[0] == pytest.approx(vba.mean[0])
-    assert default.covariance[0, 0] == pytest.approx(vba.covariance[0, 0])
+    assert isinstance(default, GammaPrecisionPrior)
+    assert isinstance(vba, GammaPrecisionPrior)
+    np.testing.assert_array_equal(vba.shape, default.shape)
+    np.testing.assert_array_equal(vba.rate, default.rate)
+    assert vba.names == default.names
 
     from scipy.stats import gamma
 
     lo, hi = 1.0 / np.sqrt(gamma.ppf([0.975, 0.025], a=1.0))
     assert lo == pytest.approx(0.52, abs=0.02)
     assert hi == pytest.approx(6.29, abs=0.10)
+
+
+def test_scale_based_noise_prior_is_conjugate_gamma():
+    prior = observation_noise_prior_from_scale(prior_scale=3.0, prior_sample_size=10.0, dim=2)
+    np.testing.assert_allclose(prior.shape, [5.0, 5.0])
+    np.testing.assert_allclose(prior.rate, [45.0, 45.0])
+    assert prior.names == ("log_observation_sd[0]", "log_observation_sd[1]")

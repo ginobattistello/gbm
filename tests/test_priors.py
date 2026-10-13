@@ -34,5 +34,3 @@ def test_priors_concatenate_blocks():
     p = Priors(GaussianPrior([1], [2], names=["theta"]), GaussianPrior([3, 4], [5, 6], names=["phi1", "phi2"]))
     np.testing.assert_allclose(p.mean, [1, 3, 4])
     assert p.names == ("theta", "phi1", "phi2")
-    assert p.theta_slice == slice(0, 1)
-    assert p.phi_slice == slice(1, 3)

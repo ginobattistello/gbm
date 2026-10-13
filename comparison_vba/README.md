@@ -25,7 +25,7 @@ The notebook shells out to MATLAB itself, so a single top-to-bottom run does
 everything. Edit the two paths in section 1 if your installs differ:
 
 ```python
-MATLAB   = "/Users/gino.diez/Applications/Matlab_R2025b.app/bin/matlab"
+MATLAB = "/Users/gino.diez/Applications/Matlab_R2025b.app/bin/matlab"
 VBA_PATH = "/Users/gino.diez/Documents/MATLAB/VBA-toolbox-master"
 ```
 

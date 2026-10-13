@@ -1,4 +1,4 @@
-"""Default observation-noise MAP against the exact Gamma conditional posterior.
+"""Reference check 10: default observation-noise MAP against the exact Gamma conditional posterior.
 
 Reference: sigma_hat = sqrt((1 + SSE/2)/(1 + T/2)), the exponentiated
 log-SD MAP. This is not the mode or mean of SD in its own coordinate.

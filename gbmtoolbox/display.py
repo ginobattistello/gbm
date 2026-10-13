@@ -139,13 +139,17 @@ def _latent_panel(ax, result, subject):
 
 def _status_panel(ax, result, subject):
     """Text panel repeating the fit's key numbers and warnings."""
+    from .diagnostics import convergence_diagnostics
+
     diag = result.math.diagnostics[subject]
     ax.axis("off")
-    starts = diag.starts
-    best = max((s.log_joint for s in starts), default=result.math.log_joint[subject])
-    agree = sum(abs(s.log_joint - best) <= 1e-4 * (1 + abs(best)) for s in starts)
+    summary = convergence_diagnostics(result, subject)
+    if summary.n_starts:
+        starts = f"starts agreeing in objective: {summary.n_objective_agreeing}/{summary.n_starts}"
+    else:
+        starts = "all parameters fixed, no search"
     lines = [
-        f"L-BFGS-B: {'converged' if diag.lbfgsb_success else 'WARNING'} · starts agreeing in objective: {agree}/{max(len(starts), 1)}",
+        f"L-BFGS-B: {'converged' if diag.lbfgsb_success else 'WARNING'} · {starts}",
         f"|gradient|: {diag.abs_grad:.2e} · invalid evaluations: {diag.n_invalid_evaluations}",
         f"observed Hessian: {diag.hess_method} · min eig: {diag.hess_raw_min_eig:.2e} · kappa: {diag.hess_condition_number:.2e}",
         f"Laplace valid: {diag.laplace_valid} · fragile: {diag.laplace_fragile} · log evidence: {result.output.log_evidence[subject]:.3f}",

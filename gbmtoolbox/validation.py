@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .optimization import preflight_objective, resolved_hard_bounds
 from .priors import covariance_matrix
 from .state_model import prepare_subject_data, trial_input
 
@@ -69,31 +70,13 @@ def validate_fit_spec(data, model, config) -> ValidatedSpec:
     if len(model.state_names) != model.n_state:
         raise ValueError("state_names are inconsistent with initial_state")
 
-    if config.hard_bounds is not None:
-        n_bounds = len(config.hard_bounds)
-        valid_lengths = {model.n_parameters}
-        if model.n_parameters > model.priors.dim:
-            valid_lengths.add(model.priors.dim)
-        if n_bounds not in valid_lengths:
-            raise ValueError(
-                "hard_bounds must contain one entry per resolved parameter, or one entry per theta/phi parameter when Q/R are estimated internally"
-            )
-        for j, pair in enumerate(config.hard_bounds):
-            if pair is None:
-                continue
-            if len(pair) != 2:
-                raise ValueError(f"hard_bounds[{j}] must be (low, high) or None")
-            lo, hi = pair
-            if lo is not None and hi is not None and not lo < hi:
-                raise ValueError(f"hard_bounds[{j}] must satisfy low < high")
+    resolved_hard_bounds(config, model)
 
     theta0, phi0, rho_q0, rho_r0 = layout.unpack(jnp.asarray(layout.mean))
 
     for n, subject in enumerate(data):
         if not isinstance(subject, dict) or "y" not in subject:
             raise ValueError(f"subject {n}: each subject must be a dict containing 'y'")
-        if "u" not in subject:
-            raise ValueError(f"subject {n}: each subject must contain the generic input field 'u'")
         y = np.asarray(subject["y"])
         if y.ndim == 0 or y.shape[0] == 0:
             raise ValueError(f"subject {n}: y must contain at least one trial")
@@ -109,8 +92,6 @@ def validate_fit_spec(data, model, config) -> ValidatedSpec:
             yf = np.asarray(y, dtype=float).reshape(-1)
             if not np.all(np.equal(yf, np.floor(yf))) or np.any(yf < 0):
                 raise ValueError(f"subject {n}: categorical y must contain non-negative integer labels")
-        else:
-            np.asarray(y, dtype=float)
 
         x0 = jnp.asarray(model.initial_state)
         u0_host = trial_input(subject.get("u"), 0, T)
@@ -176,8 +157,7 @@ def validate_fit_spec(data, model, config) -> ValidatedSpec:
 
     prepared_subjects = tuple(prepare_subject_data(subject) for subject in data)
     # Check and warm the actual optimizer executable, with the exact noise prior.
-    from .optimization import preflight_objective
-    validation_seconds = perf_counter()-validation_started
+    validation_seconds = perf_counter() - validation_started
     preflight_started = perf_counter()
     try:
         context = preflight_objective(model, config, prepared_subjects[0])
@@ -188,7 +168,13 @@ def validate_fit_spec(data, model, config) -> ValidatedSpec:
             f"Original error: {exc}"
         ) from exc
 
-    return ValidatedSpec(len(data), model.n_parameters, model.n_state, parameter_names, tuple(model.state_names),
-                         prepared_subjects, context,
-                         {"validation": validation_seconds, "preflight": perf_counter()-preflight_started})
-
+    return ValidatedSpec(
+        len(data),
+        model.n_parameters,
+        model.n_state,
+        parameter_names,
+        tuple(model.state_names),
+        prepared_subjects,
+        context,
+        {"validation": validation_seconds, "preflight": perf_counter() - preflight_started},
+    )

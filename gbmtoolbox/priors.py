@@ -22,6 +22,16 @@ def _as_mean(value) -> np.ndarray:
     return arr
 
 
+def gamma_log_sd_density(rho, shape, rate):
+    """Log density of ``rho = log(sigma)`` when the precision ``sigma**-2`` is Gamma.
+
+    ``shape`` and ``rate`` parameterise the precision. The density includes the
+    change-of-variables Jacobian ``|d precision / d rho| = 2 exp(-2 rho)`` and all
+    normalising constants, and is summed over independent components.
+    """
+    return jnp.sum(shape * jnp.log(rate) - gammaln(shape) + jnp.log(2.0) - 2.0 * shape * rho - rate * jnp.exp(-2.0 * rho))
+
+
 def covariance_matrix(value, dim: int, *, name: str, allow_semidefinite: bool = True) -> np.ndarray:
     """Expand scalar/vector/matrix covariance notation to a square matrix."""
     if value is None:
@@ -69,23 +79,18 @@ class GaussianPrior:
     names: Sequence[str] | None = None
 
     def __post_init__(self):
+        """Validate the moments and names and store them as arrays."""
         mean = _as_mean(self.mean)
+        # Only a full matrix can carry cross-covariance. Check it before the
+        # PSD test, which such a matrix would also fail, with a vaguer message.
         raw = np.asarray(self.covariance, dtype=float)
         if raw.ndim == 2 and raw.shape == (len(mean), len(mean)):
-            raw_diag = np.diag(raw)
-            for j in np.flatnonzero(np.isclose(raw_diag, 0.0, atol=1e-14, rtol=0.0)):
+            for j in np.flatnonzero(np.isclose(np.diag(raw), 0.0, atol=1e-14, rtol=0.0)):
                 row = raw[j].copy()
                 row[j] = 0.0
                 if not np.allclose(row, 0.0, atol=1e-12, rtol=0.0):
                     raise ValueError("a zero-variance fixed parameter must have zero cross-covariance")
         cov = covariance_matrix(self.covariance, len(mean), name="prior covariance")
-        diag = np.diag(cov)
-        fixed = np.isclose(diag, 0.0, atol=1e-14, rtol=0.0)
-        for j in np.flatnonzero(fixed):
-            row = cov[j].copy()
-            row[j] = 0.0
-            if not np.allclose(row, 0.0, atol=1e-12, rtol=0.0):
-                raise ValueError("a zero-variance fixed parameter must have zero cross-covariance")
         if self.names is None:
             names = None
         else:
@@ -127,6 +132,7 @@ class GammaPrecisionPrior:
     names: Sequence[str] | None = None
 
     def __post_init__(self):
+        """Broadcast shape and rate to one entry per precision and validate them."""
         a, b = np.atleast_1d(self.shape).astype(float), np.atleast_1d(self.rate).astype(float)
         if a.ndim != 1 or b.ndim != 1 or not a.size or not b.size:
             raise ValueError("Gamma shape and rate must be non-empty scalars or vectors")
@@ -145,24 +151,27 @@ class GammaPrecisionPrior:
 
     @property
     def dim(self) -> int:
+        """Number of independent precisions."""
         return int(self.shape.size)
 
     @property
     def mean(self) -> np.ndarray:
+        """Exact prior mean of each log SD, ``(log(rate) - digamma(shape)) / 2``."""
         return 0.5 * (np.log(self.rate) - digamma(self.shape))
 
     @property
     def covariance(self) -> np.ndarray:
+        """Exact prior covariance of the log SDs, ``diag(trigamma(shape) / 4)``."""
         return np.diag(0.25 * polygamma(1, self.shape))
 
     @property
     def fixed_mask(self) -> np.ndarray:
+        """Always false: a Gamma precision is never fixed."""
         return np.zeros(self.dim, dtype=bool)
 
     def log_prob_jax(self, rho):
         """Normalized density in log SD, including |d precision / d rho|."""
-        a, b = jnp.asarray(self.shape), jnp.asarray(self.rate)
-        return jnp.sum(a * jnp.log(b) - gammaln(a) + jnp.log(2.0) - 2.0 * a * rho - b * jnp.exp(-2.0 * rho))
+        return gamma_log_sd_density(rho, jnp.asarray(self.shape), jnp.asarray(self.rate))
 
     def sample(self, rng, size=None) -> np.ndarray:
         """Draw log SDs; ``size`` counts draws, each with a trailing dim axis."""
@@ -218,6 +227,7 @@ class Priors:
     observation: GaussianPrior | None = None
 
     def __post_init__(self):
+        """Require an observation prior; an omitted evolution prior becomes empty."""
         if self.observation is None:
             raise ValueError("an observation prior is required")
         if self.evolution is None:
@@ -253,13 +263,3 @@ class Priors:
         if len(set(names)) != len(names):
             raise ValueError("parameter names must be unique across evolution and observation blocks")
         return names
-
-    @property
-    def theta_slice(self) -> slice:
-        """Where the evolution parameters sit in the stacked vector."""
-        return slice(0, self.evolution.dim)
-
-    @property
-    def phi_slice(self) -> slice:
-        """Where the observation parameters sit in the stacked vector."""
-        return slice(self.evolution.dim, self.dim)

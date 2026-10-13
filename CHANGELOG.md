@@ -1,6 +1,84 @@
 # Changelog
 
-## Unreleased
+
+## Unreleased (0.2.0.dev0)
+
+### Single-subject vector input (2026-10-13)
+
+- `individual_fit(y, model, u=u)` fits one subject from its outcome vector,
+  with trial inputs as a keyword: an array of any dimension whose first axis is
+  trials, a dict of such arrays, or `None`. It is wrapped into the usual
+  subject dict before validation, so the fit is identical to
+  `individual_fit([{"y": y, "u": u}], model)` and no slower. Stacked
+  subjects-by-trials matrices are rejected as ambiguous.
+
+### Consistency review (2026-10-13)
+
+Removed (all unused, or kept only for an earlier interface):
+
+- `GroupBMS` and its dictionary output. `bms`, `bms_conditions` and
+  `bms_groups` cover the same analyses; pass `alpha0` explicitly for VBA's
+  one-total-count prior.
+- `rts_smoother_jax` and the filter's `transition_jacobian` output, which only
+  fed it; `psd_factor`; `StateModel.split_parameters`;
+  `Priors.theta_slice`/`phi_slice`; `FamilyOps.sample`; and the
+  `DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN`/`_VARIANCE` constants (use
+  `default_observation_noise_prior(1).mean`/`.covariance`).
+- Short `hard_bounds` lists covering only `[theta, phi]`. One entry per
+  resolved parameter, including estimated noise log-SDs, is now required.
+
+Changed:
+
+- `observation_noise_prior_from_scale` returns the exact conjugate
+  `GammaPrecisionPrior(nu0/2, nu0*s0**2/2)` instead of its Gaussian moment
+  match, so `prior_scale=1, prior_sample_size=2` is the default prior. An
+  outcome with no scale information raises instead of centring at zero.
+- Standalone evaluation (`model.evaluate`, `model(...)`, `evaluate_jax`) uses
+  the `Config` filter defaults (4 update iterations) instead of 8.
+- `noise_parameter_correlations` returns noise rows against free-parameter
+  columns (`noise_names`, `parameter_names`); it previously returned the whole
+  correlation matrix.
+- `observation_noise_correction` returns `valid=False` for models with a
+  stochastic latent state, where residuals also contain state variance.
+- `convergence_diagnostics` reports zero successful starts when every
+  parameter is fixed.
+- `search_log_joint` is always recorded, from evaluations already made, so
+  `fit.plot()` shows the objective path without `Config(display=True)`.
+- The subject field `u` is optional in `individual_fit`, as elsewhere.
+- Importing the toolbox sets the JAX compilation cache directory only when the
+  user has not configured one; `x64` is enabled once, in `__init__`.
+- `prior_predictive` draws every prior through one path, so seeded draws for
+  models without a Gamma noise prior differ from earlier versions.
+- `Config(parameter_scaling=...)` with a non-boolean raises `TypeError`;
+  `HBIConfig.maxiter` must be an integer; `prior_sensitivity` takes an optional
+  `config` like the other entry points.
+- `dev/13_fit_performance.py` times the default unscaled search; `--scaled`
+  replaces `--unscaled`.
+
+Housekeeping: every library function and class has a docstring again; `ruff
+check` and `ruff format` are clean (the generated VBA notebook is excluded);
+`docs/VALIDATION.md` has one numbered section per reference script (1-15) and
+no longer cites results files that are not in the repository; the tests from
+`test_priority_fixes.py` moved into topic files, with new `test_hbi.py` and
+`test_reproducibility.py`.
+
+### Reliability and reproducibility fixes (2026-10-13)
+
+- Consistent Gaussian EKF and support-preserving discrete filter solves without
+  state covariance eigenvector derivatives.
+- Require optimizer convergence and positive curvature for Laplace evidence;
+  prefer converged starts and reject invalid subject fits in HBI.
+- Include covariance in HBI stopping, support empty scientific parameter blocks,
+  and keep returned priors aligned with returned fits.
+- Split subject optimization/reporting RNG streams; activate HBI seeds and inherit
+  the fit seed when no HBI config is supplied.
+- Marginalize exactly uninformative BMS rows. Default to marginal family evidence;
+  integrate two-family posteriors and two-category group evidences by quadrature.
+  Retain explicit aggregate mode and document remaining mean-field limitations.
+- Return complete right-singular-vector bases for local identifiability; fix the
+  Bernoulli family sampler's probability argument; correct repository metadata.
+- Parameter scaling remains disabled by default.
+
 
 ### Extended BMS (2026-10-13)
 
@@ -16,7 +94,8 @@
   prior odds. Family comparisons normalize within-family evidence mixtures;
   `group_level="models"` compares the full model-frequency profiles instead.
 - Dispatch these inputs from `bms`; export `bms_conditions`, `bms_groups`,
-  result dataclasses, and the dictionary-style `GroupBMS` compatibility adapter.
+  and result dataclasses. (A dictionary-style `GroupBMS` adapter added here was
+  removed in the consistency review.)
 - Keep the original 2D model-only prior and result fields. Two-candidate EP is
   now analytic; higher-dimensional EP uses seeded, memory-bounded sampling.
 - Add analytic Dirichlet/Beta/mixture references, extended regression tests,
@@ -73,10 +152,11 @@
 - `observation_noise_prior_from_scale(y_or_prior_scale, prior_sample_size=2.0)`,
   an opt-in observation-noise prior stated as an expected noise scale `s0` and
   a prior sample size `nu0`. It is the conjugate prior
-  `lambda ~ Gamma(nu0/2, nu0*s0**2/2)` on the observation precision,
-  moment-matched onto `log_observation_sd`. The default prior assumes an
-  observation SD near 1, which biases the estimate when the outcome is on a
-  different scale and trials are few; this version is scale invariant. The
+  `lambda ~ Gamma(nu0/2, nu0*s0**2/2)` on the observation precision (exact
+  since the consistency review; first released as a moment match). The default
+  prior assumes an observation SD near 1, which biases the estimate when the
+  outcome is on a different scale and trials are few; deriving `s0` from the
+  data makes the prior follow the outcome's units. The
   scale is estimated robustly with `robust_scale` (`1.4826 * MAD`), which
   resists the outliers that would inflate a standard deviation. Also exported:
   `robust_scale`. See `examples/09_observation_only.py`.
@@ -88,10 +168,10 @@
   measurement noise automatically, while keeping a log-normal parameterisation
   that is compatible with the Laplace approximation.
 - **The default observation-noise prior is now VBA's `Ga(1, 1)` prior on
-  observation precision, moment-matched onto `log_observation_sd`**
-  (`N(0.2886, 0.4112)`, a 95% prior interval of about `[0.38, 4.69]` on the
-  observation SD; matching moments does not preserve quantiles, so the exact
-  `Ga(1, 1)` interval is `[0.52, 6.29]`). It replaces the earlier `N(0, 2)`,
+  observation precision.** It was first introduced as a Gaussian moment match
+  on `log_observation_sd` (`N(0.2886, 0.4112)`) and is now evaluated exactly in
+  that coordinate, including the change-of-variables Jacobian; its central 95%
+  interval on the observation SD is `[0.52, 6.29]`. It replaces the earlier `N(0, 2)`,
   whose implied interval `[0.06, 16]` was roughly five times wider in
   variance. Gaussian log-evidence values therefore shift again; model
   comparisons must be recomputed within one version.
@@ -113,11 +193,11 @@
 
 ### Documentation and housekeeping
 
-- Every function and class in the library now carries a docstring (161 of 161,
-  up from 32 of 123 public items), including the likelihood primitives in
+- Every function and class in the library now carries a docstring (up from
+  32 of 123 public items), including the likelihood primitives in
   `families.py` and the MAP/Laplace pipeline in `optimization.py`.
 - `docs/MANUAL.md` gains a section on models with no latent dynamics and on
-  `observation_noise_correction`, and its tutorial list now covers all ten.
+  `observation_noise_correction`, and its tutorial list covers every tutorial.
 - `docs/VALIDATION.md` gains section 11 for the observation-noise correction,
   so every reference script has a documented check.
 - Reference scripts in `dev/` are numbered consistently with the sections of
@@ -157,5 +237,6 @@
 - Convergence, Hessian, prior-information and numerical local-identifiability diagnostics.
 - Prior/posterior predictive checks and prior sensitivity.
 - Random-effects BMS plus a compact HBI-inspired hierarchical empirical-Bayes/Laplace refitting implementation.
+
 
 
