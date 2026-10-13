@@ -198,80 +198,87 @@ matrix or callable to fix `R` at a known measurement error instead, or supply
 `observation_noise_prior` to keep it estimated under your own prior.
 Bernoulli/categorical observation families do not use an additional `R_t`.
 
-### The default noise prior
+### Automatic observation noise: exact VBA prior
 
-The default is the `Ga(1, 1)` prior on observation **precision** used by the VBA
-toolbox, moment-matched onto the log standard deviation that GBM Toolbox
-actually fits. It places a 95% prior interval of roughly `[0.38, 4.69]` on the
-observation SD.
+A deterministic Gaussian model needs no user-supplied observation covariance
+or noise prior. Omit both and the toolbox automatically uses the proper prior
 
-Two choices are worth spelling out, because they look inconsistent and are not.
+$$\lambda_j = \sigma_j^{-2} \sim \operatorname{Gamma}(1,1),$$
 
-**Why a Gamma prior.** A Gamma on precision is the conjugate choice and is what
-VBA uses, so taking the same prior makes the two toolboxes agree out of the box
-rather than merely in kind.
+where Gamma is parameterized by **shape and rate**. This is the exact default
+precision prior used by VBA, rather than the previous Gaussian approximation
+to its log-SD moments. Its central 95% observation-SD interval is approximately
+`[0.52, 6.29]`, in outcome units.
 
-**Why it is still fitted on the log scale.** GBM Toolbox estimates all static
-parameters in one joint MAP/Laplace vector, so the noise posterior is
-approximated as Gaussian *in whichever coordinate it is fitted*. That
-approximation is much better in `log(sigma)` than in `sigma^2`: for 25 trials
-the exact noise posterior has skewness about `-0.28` on the log scale against
-`+1.29` for the variance, so the variance scale is roughly five times more
-skewed, and the gap is worst exactly where trials are few. VBA can afford to
-keep the Gamma form because its variational scheme updates the precision as a
-separate conjugate factor and never Laplace-approximates it.
+The fitted coordinate remains `rho = log(sigma)`. The toolbox evaluates the
+exact transformed density, including its Jacobian and normalizing constants:
 
-Taking the Gamma prior and fitting on the log scale therefore gets the prior
-beliefs of VBA in the coordinate where this toolbox's approximation is most
-accurate. Moment matching preserves the first two moments rather than the whole
-shape, so the prior is close to VBA's, not identical to it: the exact `Ga(1, 1)`
-implies a 95% SD interval of `[0.52, 6.29]` against `[0.38, 4.69]` here.
+$$\log p(\rho) = a\log b-\log\Gamma(a)+\log 2-2a\rho-b e^{-2\rho}.$$
 
-The default assumes an observation SD of order 1. When the outcome is on a
-different scale, state the scale instead, as below.
-
-### Setting the noise prior by scale
-
-The default prior is centred at `log_observation_sd = 0`, i.e. it assumes an
-observation SD near 1. Whenever the outcome is on another scale that is a
-strong hidden assumption: an SD of 0.05 or 20 sits about two prior standard
-deviations from the centre and is shrunk towards 1, and few trials cannot pull
-it back.
-
-`observation_noise_prior_from_scale` states the prior the way a conjugate
-analysis would — an expected noise scale `s0` and a prior sample size `nu0`:
+Noise is estimated jointly with scientific parameters by MAP. Its full
+curvature enters the observed Hessian and Laplace log model evidence. The
+prior is exact; the posterior and evidence remain Laplace approximations.
+VBA uses variational inference, so matching its prior does not imply identical
+posterior summaries or evidence values.
 
 ```python
-from gbmtoolbox import observation_noise_prior_from_scale
-
 model = StateModel(
-    ...,
-    observation_noise_prior=observation_noise_prior_from_scale(subject["y"]),
+    observation=lambda x, phi, u_t: phi[0] + phi[1] * u_t,
+    family="gaussian",
+    priors=Priors(observation=GaussianPrior([0.0, 0.0], [1.0, 1.0])),
 )
+fit = individual_fit(data, model)  # data is a list of subject dictionaries
+print(fit.output.observation_noise_sd)
+print(fit.output.log_evidence)
+print(fit.input.observation_noise_prior)
 ```
 
-This is the Gamma prior `lambda ~ Gamma(nu0/2, nu0*s0**2/2)` on the observation
-precision, moment-matched onto `log_observation_sd`. `nu0` contributes that many
-pseudo-observations of prior information: the default `nu0=2` gives a 95% prior
-interval of roughly `[0.38, 4.69]` times the scale — the same prior as the
-default above, recentred — while `nu0=10` is much more informative.
+An omitted `process_covariance` and `initial_state_covariance` keep latent
+states deterministic. For multivariate outcomes, set `observation_dim` to
+estimate one independent precision per output; a full covariance is not
+estimated automatically. VBA groups precisions by Gaussian source, so the
+multivariate noise structure must also be matched for comparisons with VBA.
 
-Passing `y` estimates `s0` robustly as `1.4826 * MAD(y)`, which is unaffected by
-a few outliers where the standard deviation is not — with 5% gross outliers the
-sample SD of unit noise inflates to about 3 while the robust scale stays near 1.
-Pass `prior_scale=` instead to set it yourself. Reading the scale from the data
-is empirical Bayes, so it is opt-in rather than the default.
+### Optional noise specifications and measurement units
 
-Being scale-based, the same model on the same data in different units gives the
-same posterior. It removes the bias from assuming an SD near 1; it does not make
-the noise better identified, which only more trials can do. Note that a robust
-*prior* does not make the *likelihood* robust: gross outliers still enter the
-Gaussian likelihood and inflate the fitted SD.
+The default is automatic, **not scale invariant**: Gamma(1,1) assumes a noise
+scale of order one in the outcome's units. It is fixed before observing data,
+so the default evidence does not use a data-derived noise prior.
+
+```python
+from gbmtoolbox import GammaPrecisionPrior
+
+# Optional exact prior: shape a and rate b on observation precision.
+model = StateModel(..., observation_noise_prior=GammaPrecisionPrior(shape=2, rate=0.5))
+# Optional known covariance: the number is variance, not SD.
+model = StateModel(..., observation_covariance=0.25)
+```
+
+Explicit `GaussianPrior` specifications on log SD remain supported unchanged.
+`observation_noise_prior_from_scale(y)` also retains its previous Gaussian
+moment approximation. Estimating its scale from the fitted outcomes is an
+opt-in empirical-Bayes choice. For strict Bayesian evidence, use the fixed
+default or a prior specified from independent information. Keep the same
+noise prior across candidate models when that reflects the same measurement
+process; do not choose its scale from each candidate's fitted residuals.
+
+Under a unit change `y_new = c * y`, transform predictions and affected
+scientific priors consistently and use `rate_new = c**2 * rate`. Log evidence
+then changes by the density Jacobian, which cancels between models on the same
+data. Resetting the prior to Gamma(1,1) after changing units changes the model.
+
+**Migration:** default Gaussian fits, uncertainty, and evidence can change
+relative to the previous moment-matched prior. Refit every candidate Gaussian
+model before comparing evidence from this version. Bernoulli/categorical fits,
+fixed Gaussian covariance, and explicit Gaussian log-SD priors retain their
+existing fitting objectives. See [docs/MANUAL.md](docs/MANUAL.md) for impacts,
+legacy reproduction, and [docs/VALIDATION.md](docs/VALIDATION.md) for checks.
 
 ### Is the reported observation noise trustworthy?
 
-The estimated observation SD is driven by the residuals at the fitted
-parameters, which treats those parameters as known exactly. A model with enough
+The observation SD is estimated jointly under its prior and the residual
+likelihood. Residuals at the fitted parameters treat those parameters as known
+exactly. A model with enough
 freedom relative to the number of trials absorbs part of the noise into its own
 parameters, leaving residuals that understate the true observation noise. This
 is the familiar difference between the maximum-likelihood variance `SSE/T` and
@@ -287,8 +294,9 @@ print(correction.corrected_sd, correction.inflation_factor)
 
 This recomputes the noise from the expected residual energy under the Laplace
 posterior, adding the prediction uncertainty `sum_t J_t Sigma J_t^T` induced by
-parameter uncertainty. An `inflation_factor` near 1 means the reported SD can
-be taken at face value; 1.1 or more means it cannot.
+parameter uncertainty. The `inflation_factor` compares two residual-based estimates; it does not
+measure the prior's influence or validate the reported posterior noise SD.
+Values above 1 indicate prediction uncertainty contributes to residual energy.
 
 It is a **diagnostic**: it changes neither the fit nor its log-evidence, so
 model comparison is unaffected. The correction is evaluated once at the MAP
@@ -385,8 +393,8 @@ Python 3.10 or newer is required. The inference core is built on JAX, which is
 installed automatically as a dependency.
 
 ```bash
-git clone https://github.com/ginobattistello/BayesGBM.git
-cd BayesGBM
+git clone https://github.com/ginobattistello/gbm.git
+cd gbm
 python -m pip install -e ".[dev]"
 ```
 

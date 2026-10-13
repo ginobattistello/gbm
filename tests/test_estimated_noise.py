@@ -57,10 +57,9 @@ def test_theta_phi_only_hard_bounds_remain_valid_with_internal_noise():
     assert fit.output.parameters.shape[1] == 3
 
 
-def test_default_observation_noise_matches_analytic_posterior_mode():
-    """Omitted observation_covariance must reproduce the closed-form posterior mode."""
+def test_explicit_gaussian_observation_noise_matches_analytic_posterior_mode():
+    """An explicit Gaussian log-SD prior retains the historical objective."""
     from scipy.optimize import brentq
-
     from gbmtoolbox.parameters import DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN, DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE
 
     mu = 1.25
@@ -74,6 +73,7 @@ def test_default_observation_noise_matches_analytic_posterior_mode():
         family="gaussian",
         priors=Priors(GaussianPrior([0.0], [0.0]), GaussianPrior([0.0], [0.0])),
         initial_state=[0.0],
+        observation_noise_prior=GaussianPrior([m0], [v]),
     )
     assert model.observation_covariance_mode == "diagonal"
 

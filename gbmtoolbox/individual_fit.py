@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .optimization import Config, OptimizationDiagnostics, OptimizationResult, optimize_map
+
 from .state_model import prepare_subject_data
 from .validation import validate_fit_spec
 

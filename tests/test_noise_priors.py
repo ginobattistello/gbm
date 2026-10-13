@@ -81,22 +81,20 @@ def test_scaled_noise_prior_recovers_sd_on_large_scale_data():
     # within 40% at only 25 trials, without the default prior dragging it to ~1
     assert fit.output.observation_noise_sd[0, 0] == pytest.approx(true_sd, rel=0.4)
 
-
-def test_default_noise_prior_is_vba_gamma_moment_matched():
-    """The default must equal VBA's Ga(1,1) precision prior on the log scale."""
+def test_default_noise_prior_is_exact_vba_gamma():
+    """The default has the same log moments but preserves Gamma quantiles."""
+    from gbmtoolbox import GammaPrecisionPrior
     from gbmtoolbox.parameters import default_observation_noise_prior
 
     default = default_observation_noise_prior(1)
+    assert isinstance(default, GammaPrecisionPrior)
     vba = observation_noise_prior_from_scale(prior_scale=1.0, prior_sample_size=2.0)
 
     assert default.mean[0] == pytest.approx(vba.mean[0])
     assert default.covariance[0, 0] == pytest.approx(vba.covariance[0, 0])
 
-    # Moment matching preserves the first two moments, not the quantiles, so
-    # the implied 95% SD interval is [0.38, 4.69] rather than the [0.52, 6.29]
-    # of the exact Ga(1,1). The two priors are close, not identical.
-    from scipy.stats import norm
+    from scipy.stats import gamma
 
-    lo, hi = np.exp(norm.ppf([0.025, 0.975], default.mean[0], np.sqrt(default.covariance[0, 0])))
-    assert lo == pytest.approx(0.38, abs=0.02)
-    assert hi == pytest.approx(4.69, abs=0.10)
+    lo, hi = 1.0 / np.sqrt(gamma.ppf([0.975, 0.025], a=1.0))
+    assert lo == pytest.approx(0.52, abs=0.02)
+    assert hi == pytest.approx(6.29, abs=0.10)

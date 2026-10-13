@@ -7,17 +7,15 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.special import digamma, polygamma
 
-from .priors import GaussianPrior, Priors, broadcast_prior
+from .priors import GammaPrecisionPrior, GaussianPrior, Priors, broadcast_prior
 
 #: Prior sample size (``nu0``) of the default observation-noise prior, in
 #: pseudo-observations.  ``nu0 = 2`` corresponds to the ``Ga(1, 1)`` prior on
 #: observation precision used by default in the VBA toolbox.
 DEFAULT_OBSERVATION_NOISE_PRIOR_SAMPLE_SIZE = 2.0
 
-#: Prior mean and variance on ``log_observation_sd`` implied by that prior, by
-#: moment matching (see ``observation_noise_prior_from_scale``).  They are
-#: recorded as constants because they enter the Laplace evidence like any other
-#: prior, so a change here changes every Gaussian log-evidence.
+#: Exact log-SD moments of the default Gamma precision prior. They describe
+#: prior spread and optimizer proposals; the density is evaluated exactly.
 _DEFAULT_A0 = DEFAULT_OBSERVATION_NOISE_PRIOR_SAMPLE_SIZE / 2.0
 DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN = -0.5 * (float(digamma(_DEFAULT_A0)) - float(np.log(_DEFAULT_A0)))
 DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE = 0.25 * float(polygamma(1, _DEFAULT_A0))
@@ -30,22 +28,15 @@ def _observation_noise_names(dim: int) -> tuple[str, ...]:
     return ("log_observation_sd",)
 
 
-def default_observation_noise_prior(dim: int) -> GaussianPrior:
-    """Default prior on ``log_observation_sd``.
+def default_observation_noise_prior(dim: int) -> GammaPrecisionPrior:
+    """Exact VBA Gamma(1, 1) precision prior, evaluated in log SD.
 
-    This is the ``Ga(nu0/2, nu0/2)`` prior on observation precision with
-    ``nu0 = 2`` -- i.e. VBA's default ``Ga(1, 1)`` -- moment-matched onto the
-    log standard deviation that GBM Toolbox actually fits.  It places a 95%
-    prior interval of roughly ``[0.38, 4.69]`` on the observation SD (matching
-    moments does not preserve quantiles, so the exact ``Ga(1, 1)`` interval is
-    ``[0.52, 6.29]``).
-
-    It assumes an observation SD of order 1.  When the outcome is on a very
-    different scale, state the scale instead with
-    ``observation_noise_prior_from_scale``.
+    Its 95% SD interval is [0.52, 6.29], in outcome units. The prior is
+    proper and fixed, not scale invariant or inferred from the fitted data.
     """
-    return GaussianPrior([DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN] * dim, [DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE] * dim, names=_observation_noise_names(dim))
-
+    if not isinstance(dim, (int, np.integer)) or dim < 1:
+        raise ValueError("observation noise dimension must be a positive integer")
+    return GammaPrecisionPrior(np.ones(dim), np.ones(dim), names=_observation_noise_names(dim))
 
 def robust_scale(y) -> float:
     """Robust estimate of the scale of ``y`` (``1.4826 * MAD``).
@@ -86,7 +77,7 @@ def observation_noise_prior_from_scale(y=None, dim: int = 1, *, prior_scale: flo
 
     ``prior_sample_size`` sets the strength directly.  ``nu0 = 2`` (the default)
     gives a 95% prior interval of roughly ``[0.38, 4.69]`` times the scale --
-    this is the ``Ga(1, 1)`` prior used by the VBA toolbox -- while
+    this is a Gaussian approximation to VBA's prior, not the exact default -- while
     ``nu0 = 10`` is substantially more informative.
 
     ``prior_scale`` is ``s0``.  Passing ``y`` instead estimates it robustly from
@@ -100,10 +91,9 @@ def observation_noise_prior_from_scale(y=None, dim: int = 1, *, prior_scale: flo
             observation_noise_prior=observation_noise_prior_from_scale(subject["y"]),
         )
 
-    ves thBeing scale-based, the same model fitted to the same data expressed in
-    different units gie same posterior over the parameters.  It removes
-    the bias that comes from assuming an observation SD near 1; it does not make
-    the noise better identified, which only more trials can do.
+    A change of units requires consistent transformation of predictions and
+    affected scientific parameter priors as well as this noise scale. This
+    helper remains a Gaussian moment approximation for backward compatibility.
     """
     if prior_scale is None:
         if y is None:
@@ -122,7 +112,7 @@ def observation_noise_prior_from_scale(y=None, dim: int = 1, *, prior_scale: flo
     variance = 0.25 * float(polygamma(1, a0))
     if scale <= 0.0:
         # No usable scale information: keep the shape of the prior but centre it
-        # neutrally, exactly as the default prior does.
+        # at zero for backward compatibility with this helper's fallback.
         centre = 0.0
     else:
         b0 = nu0 * scale**2 / 2.0
@@ -143,7 +133,7 @@ class ParameterLayout:
     process_noise_slice: slice
     observation_noise_slice: slice
     process_noise_prior: GaussianPrior | None
-    observation_noise_prior: GaussianPrior | None
+    observation_noise_prior: GaussianPrior | GammaPrecisionPrior | None
 
     @property
     def dim(self) -> int:
@@ -153,8 +143,10 @@ class ParameterLayout:
     @property
     def fixed_mask(self) -> np.ndarray:
         """True for parameters pinned at their prior mean by a zero variance."""
-        return np.isclose(np.diag(self.covariance), 0.0, atol=1e-14, rtol=0.0)
-
+        fixed = np.isclose(np.diag(self.covariance), 0.0, atol=1e-14, rtol=0.0)
+        if isinstance(self.observation_noise_prior, GammaPrecisionPrior):
+            fixed[self.observation_noise_slice] = False
+        return fixed
     @property
     def free_mask(self) -> np.ndarray:
         """True for parameters the optimiser actually searches over."""
@@ -165,6 +157,30 @@ class ParameterLayout:
         p = parameters
         return (p[self.theta_slice], p[self.phi_slice], p[self.process_noise_slice], p[self.observation_noise_slice])
 
+    def log_prior_correction_jax(self, parameters):
+        """Replace the independent Gaussian moment proxy by the exact density.
+
+        The Gaussian free-space density is evaluated by optimization.py. Gamma
+        entries are always free and independent of the other prior blocks.
+        """
+        import jax.numpy as jnp
+
+        prior = self.observation_noise_prior
+        if not isinstance(prior, GammaPrecisionPrior):
+            return jnp.asarray(0.0, dtype=jnp.float64)
+        rho = parameters[self.observation_noise_slice]
+        mu = jnp.asarray(prior.mean)
+        var = jnp.asarray(np.diag(prior.covariance))
+        proxy = -0.5 * jnp.sum(jnp.log(2.0 * jnp.pi * var) + (rho - mu) ** 2 / var)
+        return prior.log_prob_jax(rho) - proxy
+
+    def sample_prior(self, rng, n_samples: int) -> np.ndarray:
+        """Sample actual priors, including exact Gamma precisions."""
+        draws = rng.multivariate_normal(self.mean, self.covariance, size=n_samples)
+        draws[:, self.fixed_mask] = self.mean[self.fixed_mask]
+        if isinstance(self.observation_noise_prior, GammaPrecisionPrior):
+            draws[:, self.observation_noise_slice] = self.observation_noise_prior.sample(rng, n_samples)
+        return draws
 
 def _block_diag(blocks: list[np.ndarray]) -> np.ndarray:
     """Assemble prior blocks into one block-diagonal covariance."""
@@ -184,7 +200,7 @@ def build_parameter_layout(
     process_noise_dim: int = 0,
     process_noise_prior: GaussianPrior | None = None,
     observation_noise_dim: int = 0,
-    observation_noise_prior: GaussianPrior | None = None,
+    observation_noise_prior: GaussianPrior | GammaPrecisionPrior | None = None,
 ) -> ParameterLayout:
     """Construct the resolved full parameter vector and block-diagonal prior."""
     blocks = [priors.evolution, priors.observation]

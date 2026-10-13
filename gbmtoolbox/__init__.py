@@ -20,7 +20,7 @@ from .model_selection import BMSResult, bms
 from .optimization import Config
 from .parameters import ParameterLayout, observation_noise_prior_from_scale, robust_scale
 from .predictive import posterior_predictive, prior_predictive, simulate_subject
-from .priors import GaussianPrior, Priors
+from .priors import GammaPrecisionPrior, GaussianPrior, Priors
 from .sensitivity import prior_sensitivity
 from .state_model import StateModel
 
@@ -28,6 +28,7 @@ __all__ = [
     "BMSResult",
     "Config",
     "FitResult",
+    "GammaPrecisionPrior",
     "GaussianPrior",
     "HBIConfig",
     "HBIResult",

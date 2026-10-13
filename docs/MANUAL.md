@@ -193,41 +193,146 @@ assigns zero density to a continuous outcome. So omitting `observation_covarianc
 does not mean "no observation noise"; it means *estimate it*. The toolbox then
 appends `log_observation_sd` to the parameter vector and infers
 $R = \mathrm{diag}(e^{2\rho})$ from the data, under a default prior on $\rho$.
+The default is **exactly** the proper Gamma prior on precision used by VBA:
 
-That default is the `Ga(1,1)` prior on observation *precision* used by the VBA
-toolbox, moment-matched onto the log standard deviation that the toolbox
-actually fits: $\rho \sim \mathcal{N}(0.2886, 0.4112)$. Matching moments does
-not preserve quantiles, so the implied 95% interval on the observation SD is
-about $[0.38, 4.69]$ against $[0.52, 6.29]$ for the exact Gamma; the two priors
-are close rather than identical.
+$$\lambda_j=\sigma_j^{-2}\sim\operatorname{Gamma}(a=1,b=1),$$
 
-The prior is Gamma because that is the conjugate form and what VBA uses, but it
-is *fitted* on the log scale because the toolbox estimates noise inside one
-joint MAP/Laplace vector, and the exact noise posterior is far less skewed in
-$\log\sigma$ than in $\sigma^2$ (about $-0.28$ against $+1.29$ at $T = 25$), so
-the Gaussian Laplace approximation is much better there. A $\sigma^2$
-parameterisation would only be preferable under a variational scheme that keeps
-precision as a separate conjugate factor, as VBA does.
+where $b$ is the **rate**, not the scale. It is fixed before fitting; no
+subject-specific outcome scale is read to construct it. No observation-noise
+prior or covariance input is required from the user.
 
-Measured against the unpenalised MLE the prior moves the estimate by about 4.0%
-at $T = 50$ and 0.2% at $T = 1000$ (see `docs/VALIDATION.md`, §10).
+Inference still uses $\rho_j=\log\sigma_j$ in the joint MAP/Laplace vector.
+The change of variables is part of the prior density:
 
-The prior is documented rather than hidden because it enters the Laplace
-evidence like any other prior. Override it with `observation_noise_prior` when
-you know the noise scale, or pin $R$ outright by passing a scalar, vector,
-matrix or callable to `observation_covariance` when the measurement error is
-known independently:
+$$\log p(\rho_j)=a_j\log b_j-\log\Gamma(a_j)+\log2
+-2a_j\rho_j-b_j e^{-2\rho_j}.$$
+
+The Jacobian $|d\lambda/d\rho|=2e^{-2\rho}$ and all normalizing constants
+are included once in the prior. Automatic differentiation of the complete
+log joint supplies optimization gradients and the observed Hessian. For this
+prior the negative log-prior curvature is $4b_j e^{-2\rho_j}$, rather than
+the inverse of its global variance.
+
+Prior log-SD moments are $E[\rho]=(\log b-\psi(a))/2$ and
+$\operatorname{Var}(\rho)=\psi_1(a)/4$. At $a=b=1$, these are approximately
+0.2886 and 0.4112. They are summaries and optimizer-proposal moments, not a
+Gaussian approximation to the evaluated prior. The exact central 95% SD
+interval is approximately $[0.52,6.29]$. At shape one the prior mean of
+$\sigma^2$ is infinite; summarize prior noise with quantiles rather than a
+mean variance. Prior-predictive simulations sample
+Gamma precision directly. Posterior-predictive simulations still sample the
+joint Gaussian Laplace posterior.
 
 ```python
-StateModel(..., family="gaussian")                            # estimate R (default)
-StateModel(..., family="gaussian", observation_covariance=0.25)  # fix R = 0.25
-StateModel(..., family="gaussian",                            # estimate R, own prior
+from gbmtoolbox import GammaPrecisionPrior
+
+StateModel(..., family="gaussian")  # estimate R under exact Gamma(1,1)
+StateModel(..., family="gaussian", observation_covariance=0.25)  # fixed variance
+StateModel(..., family="gaussian",
+           observation_noise_prior=GammaPrecisionPrior(shape=2, rate=0.5))
+StateModel(..., family="gaussian",
            observation_noise_prior=GaussianPrior([np.log(0.5)], [0.5]))
 ```
 
 For multivariate Gaussian outcomes, set `observation_dim` (or supply a matching
-vector `observation_noise_prior`) so the estimated diagonal has one entry per
-observed dimension.
+vector prior) to estimate one independent precision per observed dimension.
+A scalar prior broadcasts independently. Cross-output correlations and
+trial-varying noise are not inferred by this diagonal default. VBA assigns
+precision hyperparameters by Gaussian source; one source containing several
+outputs need not match GBM's independent precisions.
+
+### Noise summaries, scale, and evidence
+
+`fit.output.observation_noise_sd` is $\exp(\widehat\rho)$, the exponentiated
+joint log-SD MAP. It is neither the posterior mean nor the SD-coordinate
+posterior mode. MAP depends on coordinate. VBA's commonly reported
+$\sqrt{b_{\mathrm{post}}/a_{\mathrm{post}}}$ is
+$1/\sqrt{E[\lambda\mid y]}$, not $E[\sigma\mid y]$.
+
+The matching Gamma prior does not reproduce VBA's inference algorithm. GBM
+uses joint MAP and observed-Hessian Laplace inference; VBA uses variational
+updates and free energy. Differences can remain for fitted scientific
+parameters, uncertainty, and log evidence. Stochastic GBM models additionally
+use their existing filtering approximation; the conjugate reference below
+applies only when predictions are fixed and the state is deterministic.
+
+For fixed scalar predictions, with $S=\sum_t(y_t-\mu_t)^2$,
+
+$$A=a+T/2,\quad B=b+S/2,\quad
+\widehat\rho=\tfrac12\log(B/A),\quad H_{\rho\rho}=4A.$$
+
+The precision posterior is Gamma($A,B$). Its integral gives the exact evidence
+reference
+
+$$\log Z=-\tfrac T2\log(2\pi)+a\log b-\log\Gamma(a)
++\log\Gamma(A)-A\log B.$$
+
+The toolbox continues to report **Laplace evidence**, even in this reference
+case; it does not substitute the analytic integral. In this one-dimensional
+case, its log-evidence error at the exact mode is
+
+$$\log Z_{\mathrm{Laplace}}-\log Z
+=(A-\tfrac12)\log A-A+\tfrac12\log(2\pi)-\log\Gamma(A).$$
+
+The error approaches zero with more observations. Numerical optimizer error
+adds a small residual. The Gamma prior is proper even at zero residual energy
+because $b>0$; no additional noise floor is introduced.
+
+**Automatic does not mean scale invariant.** The default Gamma(1,1) fixes a
+reference scale in outcome units. It is not the improper Jeffreys prior.
+Under $y'=cy$, preserve the same model by transforming predictions, affected
+scientific parameter priors, and the Gamma rate: $b'=c^2b$. Exact log evidence
+then shifts by $-N\log|c|$, with $N$ scalar observations, a common shift that
+cancels in Bayes factors on the same data. Laplace evidence follows this rule
+for a consistently transformed parameterization, up to numerical error.
+Keeping Gamma(1,1) after changing units specifies different prior beliefs.
+
+The existing `observation_noise_prior_from_scale` helper remains an explicit
+Gaussian moment approximation for compatibility. Passing observed `y` uses its
+MAD (with an SD fallback) to choose a prior scale and therefore gives
+empirical-Bayes evidence conditional on that scale. It is not used by the
+automatic default. Do not derive noise-prior scales from model-specific fitted
+residuals for model comparison.
+
+### Compatibility and model-comparison impact
+
+| Model or operation | Effect of the exact default |
+|---|---|
+| Deterministic Gaussian, omitted noise prior/covariance | MAP, covariance, noise estimates, and log evidence can change |
+| Stochastic Gaussian, omitted noise prior/covariance | Same prior change; filtering equations are unchanged but fitted parameters and filtered predictions can change |
+| Gaussian with explicit Gaussian log-SD prior | Same fitting objective, Hessian, and evidence as before |
+| Gaussian with fixed or callable covariance | No new precision parameter or prior; fitting objective unchanged |
+| Bernoulli or categorical | No observation-precision prior is added; fitting objective and filtering unchanged |
+| BMS with the same evidence matrix | Algorithm and results unchanged |
+| BMS supplied newly fitted Gaussian evidence | Responsibilities, frequencies, and protected exceedance probabilities can change |
+| HBI | Group updates unchanged; exact noise prior preserved, but changed Gaussian subject fits/evidence can change group results |
+| Prior predictive | Exact Gamma draws for the new default; explicit Gaussian and discrete prior draws retain their existing seeded behavior |
+| Information diagnostic | Subtracts actual prior curvature at the MAP, then whitens using global prior moments |
+
+Do not mix historical and new default Gaussian evidence values. Refit all
+candidate models for a consistent comparison. This is a Bayesian change of
+prior, not an empirical-Bayes change or an extra model-selection penalty.
+Evidence comparisons require models for the same observed data and observation
+measure; Gaussian densities and binary/categorical masses for differently
+encoded outcomes are not directly comparable.
+
+To reproduce the previous default explicitly:
+
+```python
+from gbmtoolbox.parameters import (
+    DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN,
+    DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE,
+)
+legacy_prior = GaussianPrior(
+    [DEFAULT_OBSERVATION_NOISE_PRIOR_MEAN],
+    [DEFAULT_OBSERVATION_NOISE_PRIOR_VARIANCE],
+)
+model = StateModel(..., observation_noise_prior=legacy_prior)
+```
+
+`fit.input.observation_noise_prior` records the resolved distribution and its
+parameters. `prior_mean` and `prior_covariance` remain moments in the fitted
+coordinates and do not alone specify a non-Gaussian density.
 
 The distinction matters because it changes the likelihood, not just the
 reporting. If the state is uncertain, it must be integrated out (below). If it
@@ -237,7 +342,8 @@ is deterministic, there is nothing to integrate.
 
 ### Priors and the posterior
 
-Each static parameter gets a Gaussian prior. Setting a prior variance to zero
+Evolution/observation parameters get Gaussian priors; estimated
+observation noise uses the exact default above unless overridden. Setting a prior variance to zero
 **fixes** that parameter at its prior mean: it is removed from the optimisation
 and reported with zero posterior variance. This is how you compare a model
 against a restricted version of itself.
@@ -366,7 +472,10 @@ the familiar gap between $SSE/T$ and $SSE/(T-p)$. The diagnostic recomputes the
 noise from the expected residual energy under the Laplace posterior and reports
 an inflation factor; near 1 the reported SD is fine, at 1.1 or above it is not.
 It changes neither the fit nor its evidence.
-
+The noise correction remains a residual-energy diagnostic: it does not
+re-estimate Gamma hyperparameters, replace the noise posterior, or change
+model evidence. Its inflation factor compares corrected and uncorrected
+residual scales, not the reported MAP SD.
 Also available: `prior_sensitivity`, to see how much conclusions depend on prior
 choices, and `prior_predictive` / `posterior_predictive`, to check that the
 model generates data resembling what was observed.
