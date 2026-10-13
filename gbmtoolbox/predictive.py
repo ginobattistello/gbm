@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .state_model import trial_input
+from .priors import GammaPrecisionPrior
 
 
 @dataclass
@@ -90,7 +91,10 @@ def prior_predictive(model, template_data, *, n_samples=100, random_state=42) ->
         raise ValueError("n_samples must be >= 1")
     rng = np.random.default_rng(random_state)
     layout = model.parameter_layout
-    params = np.stack([_draw_gaussian(layout.mean, layout.covariance, rng) for _ in range(n_samples)])
+    if isinstance(layout.observation_noise_prior, GammaPrecisionPrior):
+        params = layout.sample_prior(rng, n_samples)
+    else:
+        params = np.stack([_draw_gaussian(layout.mean, layout.covariance, rng) for _ in range(n_samples)])
     reps = [simulate_subject(model, p, template_data, rng=rng) for p in params]
     return PredictiveResult(parameters=params, replicated_data=reps)
 
@@ -112,3 +116,4 @@ def posterior_predictive(fit, subject=0, *, n_samples=100, random_state=42) -> P
     params = np.stack([_draw_gaussian(mean, cov, rng) for _ in range(n_samples)])
     reps = [simulate_subject(fit.model, p, fit.data[subject], rng=rng) for p in params]
     return PredictiveResult(parameters=params, replicated_data=reps)
+

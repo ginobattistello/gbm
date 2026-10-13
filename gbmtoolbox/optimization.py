@@ -5,6 +5,8 @@ from __future__ import annotations
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+from time import perf_counter
 
 import jax
 import jax.numpy as jnp
@@ -13,8 +15,6 @@ from scipy.optimize import minimize
 
 jax.config.update("jax_enable_x64", True)
 _COMPILED_OBJECTIVE_CACHE = {}
-
-from pathlib import Path
 
 _JAX_CACHE = Path.home() / ".cache" / "gbmtoolbox" / "jax"
 jax.config.update("jax_compilation_cache_dir", str(_JAX_CACHE))
@@ -44,12 +44,15 @@ class Config:
     latent_uncertainty: str = "none"
     latent_samples: int | None = 1000
     latent_interval: float | None = 0.95
+    parameter_scaling: bool = True
 
     def __post_init__(self):
         if not isinstance(self.num_init, int) or self.num_init < 1:
             raise ValueError("num_init must be a positive integer")
         if not isinstance(self.maxiter, int) or self.maxiter < 1:
             raise ValueError("maxiter must be a positive integer")
+        if not isinstance(self.parameter_scaling, bool):
+            raise ValueError("parameter_scaling must be a boolean")
         if self.random_state is not None and not isinstance(self.random_state, (int, np.integer)):
             raise ValueError("random_state must be an integer or None")
         if self.hessian_method not in {"autodiff", "central_fd"}:
@@ -95,6 +98,8 @@ class StartRecord:
     message: str
     n_iter: int
     gradient_norm: float
+    n_evaluations: int = 0
+    elapsed_seconds: float = 0.0
 
 
 @dataclass
@@ -124,6 +129,9 @@ class OptimizationDiagnostics:
     hess_ill_conditioned: bool = False
     laplace_valid: bool = False
     laplace_fragile: bool = False
+    timings: dict[str, float] = field(default_factory=dict)
+    n_evaluations: int = 0
+    parameter_scaling: str = "none"
 
 
 @dataclass
@@ -246,15 +254,19 @@ def _compiled_objective_functions(model, free_idx, config):
     """
 
     free_idx = tuple(int(i) for i in free_idx)
-    key = (id(model), free_idx, int(config.filter_max_iter), float(config.filter_tol), float(config.filter_damping), float(config.filter_jitter))
+    from .priors import GammaPrecisionPrior
+    gamma = isinstance(model.parameter_layout.observation_noise_prior, GammaPrecisionPrior)
+    key = (model.execution_key, free_idx, gamma, int(config.filter_max_iter), float(config.filter_tol), float(config.filter_damping), float(config.filter_jitter))
     cached = _COMPILED_OBJECTIVE_CACHE.get(key)
     if cached is not None:
         return cached
     free_idx_j = jnp.asarray(free_idx, dtype=jnp.int32)
 
-    def components(x, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data):
+    def components(z, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data,
+                   correction_arguments, offset, transform):
         """Log-likelihood and log-prior at one free-parameter vector."""
         # Reconstruct full parameter vector.
+        x = offset + transform @ z
         full = full_prior_mean.at[free_idx_j].set(x)
         run = model.evaluate_jax(
             full,
@@ -269,22 +281,68 @@ def _compiled_objective_functions(model, free_idx, config):
         delta = x - free_prior_mean
         quadratic = delta @ prior_precision @ delta
         logprior = -0.5 * (d * jnp.log(2.0 * jnp.pi) + logdet_prior_covariance + quadratic)
-        logprior = logprior + model.parameter_layout.log_prior_correction_jax(full)
+        logprior = logprior + model.parameter_layout.log_prior_correction_jax(full, correction_arguments)
         return loglik, logprior
 
-    def negative_log_joint(x, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data):
+    def negative_log_joint(x, *args):
         """Objective minimised by L-BFGS-B: minus the log joint."""
-        loglik, logprior = components(x, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data)
+        loglik, logprior = components(x, *args)
         return -(loglik + logprior)
+
+    def objective_with_components(x, *args):
+        loglik, logprior = components(x, *args)
+        return -(loglik + logprior), (loglik, logprior)
 
     compiled = {
         "components": jax.jit(components),
         "value": jax.jit(negative_log_joint),
-        "value_and_grad": jax.jit(jax.value_and_grad(negative_log_joint)),
+        "value_and_grad": jax.jit(jax.value_and_grad(objective_with_components, has_aux=True)),
         "hessian": jax.jit(jax.hessian(negative_log_joint)),
     }
     _COMPILED_OBJECTIVE_CACHE[key] = compiled
     return compiled
+
+
+def _objective_context(model, config, prepared_data):
+    """Prepare shared objective arguments for validation and optimization."""
+    layout = model.parameter_layout
+    mean, mask, free_mean, cov, precision, logdet = _free_space(layout)
+    resolved_bounds = _resolved_hard_bounds(config, model)
+    bounds = _free_bounds(resolved_bounds, mask)
+    d = free_mean.size
+    if config.parameter_scaling and d:
+        offset = free_mean.copy()
+        # A full whitening rotates box constraints; diagonal scaling preserves them.
+        transform = np.diag(np.sqrt(np.diag(cov))) if bounds is not None else np.linalg.cholesky(cov)
+        scaling = "diagonal" if bounds is not None else "cholesky"
+    else:
+        offset, transform, scaling = np.zeros(d), np.eye(d), "none"
+    inverse = np.linalg.inv(transform) if d else transform.copy()
+    if bounds is None:
+        optimizer_bounds = None
+    else:
+        optimizer_bounds = [(None if lo is None else (lo-offset[i])/transform[i, i],
+                             None if hi is None else (hi-offset[i])/transform[i, i]) for i, (lo, hi) in enumerate(bounds)]
+    args = (jnp.asarray(mean), jnp.asarray(free_mean), jnp.asarray(precision), jnp.asarray(logdet),
+            prepared_data, layout.prior_correction_arguments(), jnp.asarray(offset), jnp.asarray(transform))
+    return dict(mean=mean, mask=mask, free_mean=free_mean, covariance=cov, bounds=bounds,
+                resolved_bounds=resolved_bounds, optimizer_bounds=optimizer_bounds, offset=offset,
+                transform=transform, inverse=inverse, scaling=scaling, args=args,
+                compiled=_compiled_objective_functions(model, np.flatnonzero(mask), config))
+
+
+def preflight_objective(model, config, prepared_data):
+    """Warm and check exactly the executable subsequently used by SciPy."""
+    context = _objective_context(model, config, prepared_data)
+    x0 = _clip_to_bounds(context["free_mean"], context["bounds"])
+    z0 = context["inverse"] @ (x0-context["offset"])
+    result = context["compiled"]["value_and_grad"](jnp.asarray(z0), *context["args"])
+    (value, (ll, lp)), grad = jax.device_get(result)
+    if not np.isfinite(value) or not np.isfinite(ll) or not np.isfinite(lp) or not np.all(np.isfinite(grad)):
+        raise ValueError("JAX likelihood, prior or gradient is non-finite at the initial point")
+    context["preflight_result"] = ((value, (ll, lp)), grad)
+    context["preflight_z"] = z0
+    return context
 
 
 def central_hessian(func, x, relative_step=1e-4):
@@ -326,7 +384,7 @@ def central_hessian(func, x, relative_step=1e-4):
     return 0.5 * (H + H.T)
 
 
-def optimize_map(subject_data, model, config: Config, *, rng=None) -> OptimizationResult:
+def optimize_map(subject_data, model, config: Config, *, rng=None, prepared_data=None, objective_context=None) -> OptimizationResult:
     """Fit one subject: multi-start MAP, then an independent Laplace step.
 
     The pipeline is deliberately two-stage::
@@ -347,45 +405,46 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
     """
     from .state_model import prepare_subject_data
 
+    total_started = perf_counter()
     if rng is None:
         rng = np.random.default_rng(config.random_state)
-    layout = model.parameter_layout
-    mean, free_mask, free_mean, free_covariance, precision, logdet_covariance = _free_space(layout)
-    resolved_hard_bounds = _resolved_hard_bounds(config, model)
-    bounds = _free_bounds(resolved_hard_bounds, free_mask)
+    prepared = prepare_subject_data(subject_data) if prepared_data is None else prepared_data
+    context = _objective_context(model, config, prepared) if objective_context is None else objective_context
+    mean, free_mask = context["mean"], context["mask"]
+    free_mean, free_covariance = context["free_mean"], context["covariance"]
+    bounds, resolved_hard_bounds = context["bounds"], context["resolved_bounds"]
+    offset, transform, inverse = context["offset"], context["transform"], context["inverse"]
     d = int(np.sum(free_mask))
-    free_idx = np.flatnonzero(free_mask)
-    prepared = prepare_subject_data(subject_data)
+    compiled, args = context["compiled"], context["args"]
 
-    mean_j = jnp.asarray(mean, dtype=jnp.float64)
-    free_mean_j = jnp.asarray(free_mean, dtype=jnp.float64)
-    precision_j = jnp.asarray(precision, dtype=jnp.float64)
-    logdet_covariance_j = jnp.asarray(logdet_covariance, dtype=jnp.float64)
-    compiled = _compiled_objective_functions(model, free_idx, config)
+    def to_free(z):
+        return offset + transform @ np.asarray(z, dtype=float)
 
-    compiled_components = compiled["components"]
-    compiled_value = compiled["value"]
-    compiled_value_and_grad = compiled["value_and_grad"]
-    compiled_hessian = compiled["hessian"]
-
-    def components_jax(x):
-        """Log-likelihood and log-prior at ``x``, with this subject's data bound."""
-        return compiled_components(x, mean_j, free_mean_j, precision_j, logdet_covariance_j, prepared)
+    def to_optimizer(x):
+        return inverse @ (np.asarray(x, dtype=float)-offset)
 
     def objective_jax(x):
         """Negative log joint at ``x``."""
-        return compiled_value(x, mean_j, free_mean_j, precision_j, logdet_covariance_j, prepared)
+        return compiled["value"](x, *args)
 
     def objective_value_and_grad_jax(x):
         """Negative log joint and its exact gradient at ``x``."""
-        return compiled_value_and_grad(x, mean_j, free_mean_j, precision_j, logdet_covariance_j, prepared)
+        return compiled["value_and_grad"](x, *args)
 
     def objective_hessian_jax(x):
         """Observed Hessian of the negative log joint at ``x``."""
-        return compiled_hessian(x, mean_j, free_mean_j, precision_j, logdet_covariance_j, prepared)
+        return compiled["hessian"](x, *args)
+
+    first_started = perf_counter()
+    first_z = to_optimizer(_clip_to_bounds(free_mean, bounds))
+    if "preflight_result" in context and np.array_equal(first_z, context["preflight_z"]):
+        first_result = context["preflight_result"]
+    else:
+        first_result = jax.device_get(objective_value_and_grad_jax(jnp.asarray(first_z)))
+    first_seconds = perf_counter()-first_started
 
     if d == 0:
-        ll, lp = components_jax(jnp.zeros((0,), dtype=jnp.float64))
+        (_, (ll, lp)), _ = first_result
         ll = float(ll)
         lp = float(lp)
         diagnostics = OptimizationDiagnostics(
@@ -399,10 +458,15 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
             hess_method=config.hessian_method,
             laplace_valid=True,
             laplace_fragile=False,
+            timings={"first_objective": first_seconds, "optimization": 0.0, "hessian": 0.0,
+                     "map_components": 0.0, "optimize_total": perf_counter()-total_started},
+            parameter_scaling=context["scaling"],
         )
         return OptimizationResult(mean.copy(), np.zeros(0), ll, lp, ll + lp, np.zeros((0, 0)), np.zeros((0, 0)), ll + lp, diagnostics, free_mask)
 
     invalid_count = 0
+    # Reuse the warmed evaluation on SciPy's first request.
+    last_x, last_result = first_z.copy(), first_result
 
     def scipy_fun(x):
         """Value and gradient for SciPy, counting non-finite evaluations.
@@ -411,9 +475,11 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
         a zero gradient, so one bad region cannot abort the whole search; the
         occurrences are counted in ``n_invalid_evaluations`` instead.
         """
-        nonlocal invalid_count
-        x_jax = jnp.asarray(x, dtype=jnp.float64)
-        value, grad = objective_value_and_grad_jax(x_jax)
+        nonlocal invalid_count, last_x, last_result
+        if not np.array_equal(x, last_x):
+            last_x = np.asarray(x, dtype=float).copy()
+            last_result = jax.device_get(objective_value_and_grad_jax(jnp.asarray(x, dtype=jnp.float64)))
+        (value, _), grad = last_result
         value_np = float(value)
         grad_np = np.asarray(grad, dtype=float)
         if not np.isfinite(value_np) or not np.all(np.isfinite(grad_np)):
@@ -430,9 +496,11 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
     best_fval = np.inf
     best_path = None
     best_path_log_joint = None
+    optimization_started = perf_counter()
 
     for init in init_list:
-        path = [np.asarray(init, dtype=float).copy()]
+        z_init = to_optimizer(init)
+        path = [z_init.copy()]
 
         def callback(xk):
             """Record the search path for this start."""
@@ -440,7 +508,8 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
             # synchronously, so the closure always appends to the current start.
             path.append(np.asarray(xk, dtype=float).copy())
 
-        res = minimize(scipy_fun, init, method="L-BFGS-B", jac=True, bounds=bounds, callback=callback, options={"maxiter": config.maxiter})
+        start_started = perf_counter()
+        res = minimize(scipy_fun, z_init, method="L-BFGS-B", jac=True, bounds=context["optimizer_bounds"], callback=callback, options={"maxiter": config.maxiter})
         fval = float(res.fun)
         if getattr(res, "jac", None) is not None:
             grad = np.asarray(res.jac, dtype=float)
@@ -450,13 +519,15 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
         starts.append(
             StartRecord(
                 initial_parameters=_reconstruct_host(init, mean, free_mask),
-                final_parameters=_reconstruct_host(res.x, mean, free_mask),
+                final_parameters=_reconstruct_host(to_free(res.x), mean, free_mask),
                 log_joint=logjoint,
                 success=bool(res.success and np.isfinite(logjoint)),
                 status=int(res.status),
                 message=str(res.message),
                 n_iter=int(getattr(res, "nit", 0)),
-                gradient_norm=float(np.linalg.norm(grad)) if np.all(np.isfinite(grad)) else np.nan,
+                gradient_norm=float(np.linalg.norm(inverse.T @ grad)) if np.all(np.isfinite(grad)) else np.nan,
+                n_evaluations=int(getattr(res, "nfev", 0)),
+                elapsed_seconds=perf_counter()-start_started,
             )
         )
         if np.isfinite(fval) and fval < best_fval:
@@ -471,18 +542,27 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
     if best is None or not np.isfinite(best_fval):
         raise RuntimeError("MAP optimization did not find a finite objective value")
 
-    xhat = np.asarray(best.x, dtype=float)
+    optimization_seconds = perf_counter()-optimization_started
+    zhat = np.asarray(best.x, dtype=float)
+    xhat = to_free(zhat)
     full_hat = _reconstruct_host(xhat, mean, free_mask)
-    final_ll_j, final_lp_j = components_jax(jnp.asarray(xhat))
+    components_started = perf_counter()
+    # Value-and-gradient already returns the density components as auxiliary outputs.
+    final_result = last_result if np.array_equal(zhat, last_x) else jax.device_get(objective_value_and_grad_jax(jnp.asarray(zhat)))
+    (_, (final_ll_j, final_lp_j)), _ = final_result
     final_ll, final_lp = float(final_ll_j), float(final_lp_j)
+    components_seconds = perf_counter()-components_started
     logjoint = final_ll + final_lp
     at_bounds_full = _at_hard_bounds(full_hat, resolved_hard_bounds)
     at_any_bound = bool(np.any(at_bounds_full))
 
+    hessian_started = perf_counter()
     if config.hessian_method == "autodiff":
-        H = np.asarray(objective_hessian_jax(jnp.asarray(xhat, dtype=jnp.float64)), dtype=float)
+        H_z = np.asarray(objective_hessian_jax(jnp.asarray(zhat, dtype=jnp.float64)), dtype=float)
+        H = inverse.T @ H_z @ inverse
     else:
-        H = central_hessian(lambda z: float(objective_jax(jnp.asarray(z, dtype=jnp.float64))), xhat, config.hessian_relative_step)
+        H = central_hessian(lambda x: float(objective_jax(jnp.asarray(to_optimizer(x), dtype=jnp.float64))), xhat, config.hessian_relative_step)
+    hessian_seconds = perf_counter()-hessian_started
     H = 0.5 * (H + H.T)
     if not np.all(np.isfinite(H)):
         raise FloatingPointError("observed Hessian contains non-finite values")
@@ -511,12 +591,13 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
     if getattr(best, "jac", None) is not None:
         best_gradient = np.asarray(best.jac, dtype=float)
     else:
-        _, grad_j = objective_value_and_grad_jax(jnp.asarray(xhat, dtype=jnp.float64))
+        _, grad_j = objective_value_and_grad_jax(jnp.asarray(zhat, dtype=jnp.float64))
         best_gradient = np.asarray(grad_j, dtype=float)
+    best_gradient = inverse.T @ best_gradient
 
     diagnostics = OptimizationDiagnostics(
         starts=starts,
-        search_path=np.asarray([_reconstruct_host(x, mean, free_mask) for x in best_path]),
+        search_path=np.asarray([_reconstruct_host(to_free(x), mean, free_mask) for x in best_path]),
         search_log_joint=best_path_log_joint,
         lbfgsb_success=bool(best.success),
         lbfgsb_status=int(best.status),
@@ -531,5 +612,11 @@ def optimize_map(subject_data, model, config: Config, *, rng=None) -> Optimizati
         hess_ill_conditioned=ill,
         laplace_valid=laplace_valid,
         laplace_fragile=laplace_fragile,
+        timings={"first_objective": first_seconds, "optimization": optimization_seconds,
+                 "map_components": components_seconds, "hessian": hessian_seconds,
+                 "optimize_total": perf_counter()-total_started},
+        n_evaluations=sum(s.n_evaluations for s in starts),
+        parameter_scaling=context["scaling"],
     )
     return OptimizationResult(full_hat, xhat, final_ll, final_lp, logjoint, H, covariance, log_evidence, diagnostics, free_mask)
+

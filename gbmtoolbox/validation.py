@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import perf_counter
 
 import jax
 import jax.numpy as jnp
@@ -24,6 +25,9 @@ class ValidatedSpec:
     n_state: int
     parameter_names: tuple[str, ...]
     state_names: tuple[str, ...]
+    prepared_subjects: tuple = field(default_factory=tuple, repr=False)
+    objective_context: dict | None = field(default=None, repr=False)
+    timings: dict = field(default_factory=dict)
 
 
 def _check_numeric_finite(value, name: str):
@@ -54,6 +58,7 @@ def _validate_u(u, T: int, subject: int):
 
 def validate_fit_spec(data, model, config) -> ValidatedSpec:
     """Check modeller inputs and JAX traceability before optimization."""
+    validation_started = perf_counter()
     if not isinstance(data, (list, tuple)) or len(data) == 0:
         raise ValueError("data must be a non-empty list/tuple of subject dictionaries")
 
@@ -169,27 +174,13 @@ def validate_fit_spec(data, model, config) -> ValidatedSpec:
             "latent_uncertainty='filtered' requires initial-state uncertainty or process_covariance; use 'propagated' or 'none' for a deterministic state model"
         )
 
-    # Explicit JAX smoke test on one complete subject likelihood and its gradient.
-    prepared = prepare_subject_data(data[0])
-    p0 = jnp.asarray(layout.mean, dtype=jnp.float64)
-
-    def objective(p):
-        """Total log-likelihood, used only for the preflight gradient check."""
-        run = model.evaluate_jax(
-            p,
-            prepared,
-            filter_max_iter=config.filter_max_iter,
-            filter_tol=config.filter_tol,
-            filter_damping=config.filter_damping,
-            filter_jitter=config.filter_jitter,
-        )
-        return -jnp.sum(run["loglik"])
-
+    prepared_subjects = tuple(prepare_subject_data(subject) for subject in data)
+    # Check and warm the actual optimizer executable, with the exact noise prior.
+    from .optimization import preflight_objective
+    validation_seconds = perf_counter()-validation_started
+    preflight_started = perf_counter()
     try:
-        value = jax.jit(objective)(p0)
-        grad = jax.jit(jax.grad(objective))(p0)
-        if not np.isfinite(float(value)) or not np.all(np.isfinite(np.asarray(grad))):
-            raise ValueError("JAX likelihood or gradient is non-finite at the prior mean")
+        context = preflight_objective(model, config, prepared_subjects[0])
     except Exception as exc:
         raise ValueError(
             "model failed the JAX trace/gradient preflight. Use jax.numpy operations, avoid Python int/float casts of traced values, "
@@ -197,4 +188,7 @@ def validate_fit_spec(data, model, config) -> ValidatedSpec:
             f"Original error: {exc}"
         ) from exc
 
-    return ValidatedSpec(len(data), model.n_parameters, model.n_state, parameter_names, tuple(model.state_names))
+    return ValidatedSpec(len(data), model.n_parameters, model.n_state, parameter_names, tuple(model.state_names),
+                         prepared_subjects, context,
+                         {"validation": validation_seconds, "preflight": perf_counter()-preflight_started})
+

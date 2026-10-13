@@ -35,6 +35,82 @@ for f in gbmtoolbox/dev/*.py; do python "$f"; done   # scientific layer
 
 CI additionally runs the suite on Python 3.10, 3.11, 3.12 and 3.13.
 
+## Performance update validation
+
+The results above describe the historical validation environment. The
+2026-10-13 performance update was checked separately on Linux x86_64, Python
+3.12.14, NumPy 2.2.6, SciPy 1.15.3, and JAX/jaxlib 0.4.38 on CPU.
+All 12 existing scientific reference scripts pass. Recorded outputs are in
+`docs/REFERENCE_RESULTS.json`. The complete suite passes **114 tests**, including 18 new tests in
+`tests/test_performance_paths.py`.
+
+The new checks cover:
+
+- Vectorized Gaussian, Bernoulli, and categorical observation-only likelihoods,
+  gradients, and Hessians against the original sequential formulas, with and
+  without dictionary inputs. Absolute/relative tolerances are at most `2e-11`.
+- Scalar, fixed diagonal, estimated diagonal, correlated full, and callable
+  Gaussian covariance paths against the normalized dense Gaussian likelihood.
+- Scaled MAPs against the analytic linear Gaussian regression posterior with a
+  correlated prior. Returned Hessians match `X.T @ X / variance + prior_precision`
+  to `1e-10`; scaled/unscaled covariance and evidence agree to `1e-12`/`1e-8` in
+  this case. Bound-constrained fits preserve box bounds, and fixed parameters
+  retain zero posterior variance.
+- Equality of the objective and original-coordinate Hessian at the same
+  parameter point under both scaled and unscaled optimizer coordinates.
+- Compilation reuse after Gaussian and exact Gamma hyperparameters change,
+  compared with an independently compiled equivalent model. This detects stale
+  prior values in cached executables.
+- One preparation per subject, finite stage timings and evaluation counts, and
+  retention of filtering when an identity state is uncertain.
+
+The existing analytic family tests, linear Gaussian filtering checks,
+discrete filtering quadrature checks, and analytic Gamma evidence/Bayes-factor
+tests remain part of the full suite. Code-to-code agreement supplements these
+mathematical references; it is not used as their replacement.
+
+Three defects already present at base commit
+`c28a46f294d850db99db67eac9ec957ed9a9ed68` were corrected while making the suite
+green: missing documented prior metadata, Gaussian-proxy draws in the Gamma
+prior-predictive path, and Gaussian-proxy curvature subtraction in the data
+information diagnostic. Exact prior density, MAP likelihood, and Laplace
+evidence were already correct; these fixes affect metadata, prior-predictive
+simulation, and information reporting, respectively. The information check uses
+the analytic likelihood curvature `2 * SSE * exp(-2*rho)` with exact prior
+curvature `4 * rate * exp(-2*rho)` subtracted from the posterior Hessian.
+
+### Before/after timing experiment
+
+`gbmtoolbox/dev/13_fit_performance.py` was run against the base commit and this
+update in separate processes. Each example used 2,000 trials, two observation
+coefficients, one initialization, and no latent propagation. Gaussian noise
+was estimated under the exact default prior. The base search used original
+coordinates; the updated search used its default scaling. Persistent disk
+compilation caching was disabled. Warm results are medians of five further
+complete fits using the same model object and array shapes. Runs were sequential
+on the same machine; no timing threshold is asserted in tests.
+
+| Outcome | Base first fit (s) | Updated first fit (s) | Base warm fit (s) | Updated warm fit (s) | Warm speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gaussian | 1.466 | 0.648 | 0.428 | 0.00701 | 61.0x |
+| Bernoulli | 0.567 | 0.409 | 0.179 | 0.00512 | 35.0x |
+| Categorical | 0.772 | 0.415 | 0.227 | 0.00523 | 43.4x |
+
+Maximum fitted-parameter differences were `4.90e-7` (Gaussian) and below
+`2e-16` (discrete examples). Absolute log-evidence differences were `1.47e-6`
+and zero, respectively, consistent with the different numerical search path
+for estimated Gaussian noise. These examples do not establish a speedup for
+nonlinear dynamics, stochastic filtering, different hardware, or your real
+model. Cold and warm timing differences must be reported separately.
+
+Raw measurements are in `docs/PERFORMANCE_RESULTS.json`. To reproduce:
+
+```bash
+python gbmtoolbox/dev/13_fit_performance.py --trials 2000 --repeats 5
+# Optional comparison of execution changes without optimizer scaling:
+python gbmtoolbox/dev/13_fit_performance.py --trials 2000 --repeats 5 --unscaled
+```
+
 ---
 
 ## 1. Family likelihoods against closed-form formulas
@@ -302,3 +378,4 @@ Numerical rules the implementation holds itself to:
 - A finite MAP and a valid Laplace approximation are separate outcomes.
 - Discrete-state filtering is approximate and must stay labelled as such.
 - Modeller programming errors should surface, not be silently absorbed.
+

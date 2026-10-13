@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any
 
@@ -16,6 +16,36 @@ from .parameters import ParameterLayout, build_parameter_layout
 from .priors import GaussianPrior, Priors, covariance_matrix
 
 Family = str
+_EVALUATOR_CACHE = {}
+
+
+def _static_key(value):
+    """Hash fixed numeric settings; callables are identified by identity."""
+    if value is None or isinstance(value, str):
+        return value
+    if callable(value):
+        return ("callable", id(value))
+    arr = np.asarray(value)
+    return (arr.shape, arr.dtype.str, arr.tobytes())
+
+
+def filter_settings(config=None):
+    """Keep historical standalone defaults; fitting passes its Config."""
+    if config is None:
+        return (8, 1e-8, 1.0, 1e-9)
+    return (int(config.filter_max_iter), float(config.filter_tol), float(config.filter_damping), float(config.filter_jitter))
+
+
+def compiled_evaluator(model, config=None):
+    """Reuse the full evaluator across subjects and changes of prior values."""
+    settings = filter_settings(config)
+    key = (model.execution_key, settings)
+    if key not in _EVALUATOR_CACHE:
+        def evaluate(parameters, prepared_data):
+            return model.evaluate_jax(parameters, prepared_data, filter_max_iter=settings[0], filter_tol=settings[1],
+                                      filter_damping=settings[2], filter_jitter=settings[3])
+        _EVALUATOR_CACHE[key] = jax.jit(evaluate)
+    return _EVALUATOR_CACHE[key]
 
 
 def trial_input(u: Any, t: int, T: int):
@@ -124,8 +154,8 @@ class StateModel:
     #: Latent state on the first trial.  Observation-only models can leave this
     #: at its default: with no evolution the state never changes, and an
     #: observation function that ignores ``x`` gives the same fit whatever it
-    #: holds.  It is still carried because the trial recursion needs a state to
-    #: thread through.
+    #: holds. Deterministic observation-only models broadcast this constant
+    #: state for reporting and evaluate independent trials with vmap.
     initial_state: Sequence[float] = (0.0,)
     initial_state_covariance: object | None = None
     process_covariance: object | None = None
@@ -135,6 +165,7 @@ class StateModel:
     observation_dim: int | None = None
     state_names: Sequence[str] | None = None
     name: str | None = None
+    _observation_only: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.observation is None:
@@ -151,6 +182,7 @@ class StateModel:
                     "function or drop the evolution prior"
                 )
             object.__setattr__(self, "evolution", _identity_evolution)
+        object.__setattr__(self, "_observation_only", self.evolution is _identity_evolution)
         family = str(self.family).lower()
         get_family(family)
         x0 = np.asarray(self.initial_state, dtype=float).reshape(-1)
@@ -246,6 +278,21 @@ class StateModel:
         """Length of the full fitted vector, including any noise parameters."""
         return self.parameter_layout.dim
 
+    @cached_property
+    def execution_key(self):
+        """Execution structure, excluding names and numerical prior values.
+
+        Cached functions retain their model, preventing callable id reuse.
+        User callables and their captured settings must remain immutable.
+        Subclasses conservatively keep an identity-specific cache entry.
+        """
+        if type(self) is not StateModel:
+            return (type(self), id(self))
+        return (type(self), id(self.evolution), id(self.observation), self.family, self._observation_only,
+                _static_key(self.initial_state), _static_key(self.initial_state_covariance),
+                _static_key(self.process_covariance), _static_key(self.observation_covariance),
+                self.n_theta, self.n_phi, self.n_state, self.resolved_observation_dim)
+
     def split_parameters(self, parameters):
         """Backward-compatible split returning only ``theta, phi``."""
         p = parameters
@@ -337,7 +384,7 @@ class StateModel:
             R = None
             if self.family == "gaussian":
                 R = self.observation_covariance_jax(phi, rho_r, u_t, eta.shape[0])
-            ll = family.log_prob(y_t, eta, R)
+            ll = self.observation_log_prob_jax(y_t, eta, phi, rho_r, u_t, R)
             pred = family.mean(eta, R)
             x_next = jnp.asarray(self.evolution(x, theta, u_t, y_t), dtype=jnp.float64).reshape(x.shape)
             return x_next, (x, pred, ll)
@@ -365,6 +412,38 @@ class StateModel:
             "prediction": predictions,
         }
 
+    def observation_log_prob_jax(self, y, eta, phi, rho_r, u_t, R=None):
+        """Use elementwise Gaussian arithmetic when R is known to be diagonal."""
+        if self.family == "gaussian":
+            if self.observation_covariance_mode == "diagonal":
+                return get_family(self.family).diagonal_log_prob(y, eta, rho_r)
+            if self.observation_covariance_mode == "fixed":
+                fixed = np.asarray(self.observation_covariance)
+                if fixed.ndim <= 1:
+                    variance = jnp.broadcast_to(jnp.asarray(fixed), eta.shape)
+                    return get_family(self.family).diagonal_log_prob(y, eta, 0.5 * jnp.log(variance))
+        return get_family(self.family).log_prob(y, eta, R)
+
+    def observation_only_run_jax(self, parameters, prepared_data):
+        """Independent trials with a known constant state: no sequential scan."""
+        _, phi, _, rho_r = self.unpack_parameters(parameters)
+        family = get_family(self.family)
+        x = jnp.asarray(self.initial_state)
+        y, u = prepared_data["y"], prepared_data["u"]
+
+        def trial(y_t, u_t):
+            eta = jnp.atleast_1d(self.observation(x, phi, u_t))
+            R = self.observation_covariance_jax(phi, rho_r, u_t, eta.shape[0]) if self.family == "gaussian" else None
+            return self.observation_log_prob_jax(y_t, eta, phi, rho_r, u_t, R), family.mean(eta, R)
+
+        if u is None:
+            loglik, predictions = jax.vmap(lambda y_t: trial(y_t, None))(y)
+        else:
+            loglik, predictions = jax.vmap(trial)(y, u)
+        return {"loglik": loglik, "prediction": predictions,
+                "states": jnp.broadcast_to(x, (y.shape[0], self.n_state)),
+                "state_covariance": jnp.zeros((y.shape[0], self.n_state, self.n_state), dtype=jnp.float64)}
+
     def evaluate_jax(
         self, parameters, prepared_data, *, filter_max_iter: int = 8, filter_tol: float = 1e-8, filter_damping: float = 1.0, filter_jitter: float = 1e-9
     ):
@@ -380,25 +459,19 @@ class StateModel:
             return nonlinear_state_filter_jax(
                 self, parameters, prepared_data, max_update_iter=filter_max_iter, update_tol=filter_tol, damping=filter_damping, jitter=filter_jitter
             )
+        if self._observation_only:
+            return self.observation_only_run_jax(parameters, prepared_data)
         return self.deterministic_run_jax(parameters, prepared_data)
 
-    def evaluate(self, parameters, subject_data, *, config=None):
+    def evaluate(self, parameters, subject_data, *, config=None, prepared_data=None):
         """Host-side ``evaluate_jax``: NumPy arrays plus the filtering method used.
 
         Also squeezes the trailing axis off scalar Gaussian and Bernoulli
         predictions, so a single-output model reports ``(T,)`` rather than
         ``(T, 1)``.
         """
-        prepared = prepare_subject_data(subject_data)
-        kwargs = {}
-        if config is not None:
-            kwargs = {
-                "filter_max_iter": config.filter_max_iter,
-                "filter_tol": config.filter_tol,
-                "filter_damping": config.filter_damping,
-                "filter_jitter": config.filter_jitter,
-            }
-        out = self.evaluate_jax(jnp.asarray(parameters, dtype=jnp.float64), prepared, **kwargs)
+        prepared = prepare_subject_data(subject_data) if prepared_data is None else prepared_data
+        out = compiled_evaluator(self, config)(jnp.asarray(parameters, dtype=jnp.float64), prepared)
         host = jax.tree_util.tree_map(lambda z: np.asarray(z), out)
         host["filtering_method"] = "generalized_gaussian_fisher" if self.has_state_uncertainty() else "deterministic"
         pred = host["prediction"]
@@ -409,3 +482,4 @@ class StateModel:
     def __call__(self, parameters, subject_data):
         """Per-trial log-likelihood, so the model can be used as a plain function."""
         return self.evaluate(parameters, subject_data)["loglik"]
+

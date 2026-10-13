@@ -159,7 +159,15 @@ class ParameterLayout:
         p = parameters
         return (p[self.theta_slice], p[self.phi_slice], p[self.process_noise_slice], p[self.observation_noise_slice])
 
-    def log_prior_correction_jax(self, parameters):
+    def prior_correction_arguments(self):
+        """Dynamic exact-prior quantities, reusable across compiled fits."""
+        import jax.numpy as jnp
+        prior = self.observation_noise_prior
+        if isinstance(prior, GammaPrecisionPrior):
+            return tuple(jnp.asarray(v) for v in (prior.shape, prior.rate, prior.mean, np.diag(prior.covariance)))
+        return tuple(jnp.zeros((0,), dtype=jnp.float64) for _ in range(4))
+
+    def log_prior_correction_jax(self, parameters, correction_arguments=None):
         """Replace the independent Gaussian moment proxy by the exact density.
 
         The Gaussian free-space density is evaluated by optimization.py. Gamma
@@ -171,10 +179,11 @@ class ParameterLayout:
         if not isinstance(prior, GammaPrecisionPrior):
             return jnp.asarray(0.0, dtype=jnp.float64)
         rho = parameters[self.observation_noise_slice]
-        mu = jnp.asarray(prior.mean)
-        var = jnp.asarray(np.diag(prior.covariance))
+        from jax.scipy.special import gammaln
+        a, b, mu, var = self.prior_correction_arguments() if correction_arguments is None else correction_arguments
         proxy = -0.5 * jnp.sum(jnp.log(2.0 * jnp.pi * var) + (rho - mu) ** 2 / var)
-        return prior.log_prob_jax(rho) - proxy
+        exact = jnp.sum(a * jnp.log(b) - gammaln(a) + jnp.log(2.0) - 2.0 * a * rho - b * jnp.exp(-2.0 * rho))
+        return exact - proxy
 
     def sample_prior(self, rng, n_samples: int) -> np.ndarray:
         """Sample actual priors, including exact Gamma precisions."""
@@ -255,3 +264,4 @@ def build_parameter_layout(
         process_noise_prior=pq,
         observation_noise_prior=pr,
     )
+

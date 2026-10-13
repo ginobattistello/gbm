@@ -88,6 +88,12 @@ class FamilyOps:
             return jax.nn.one_hot(yi, eta.shape[0], dtype=eta.dtype) - p
         raise ValueError(f"unsupported family {self.name!r}")
 
+    def diagonal_log_prob(self, y, eta, log_sd):
+        """Normalized independent Gaussian density, without dense algebra."""
+        eta = jnp.atleast_1d(eta)
+        residual = jnp.atleast_1d(y).astype(eta.dtype) - eta
+        return -0.5 * jnp.sum(jnp.log(2.0 * jnp.pi) + 2.0 * log_sd + residual ** 2 * jnp.exp(-2.0 * log_sd))
+
     def fisher(self, eta, observation_covariance=None):
         """Fisher information of ``eta``: minus the expected second derivative.
 
@@ -131,3 +137,4 @@ def get_family(name: str) -> FamilyOps:
     if family not in {"gaussian", "bernoulli", "categorical"}:
         raise ValueError("family must be 'gaussian', 'bernoulli', or 'categorical'")
     return FamilyOps(family)
+

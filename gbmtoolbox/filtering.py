@@ -53,7 +53,7 @@ def _generalized_update(model, family, m_pred, P_pred, phi, rho_r, u_t, y_t, *, 
     x_mode, eta_mode, R_mode, A, _ = terms(z)
     cov_z = solve_spd(A, eye, jitter=jitter)
     P_filt = symmetrize(L @ cov_z @ L.T)
-    ll_mode = family.log_prob(y_t, eta_mode, R_mode)
+    ll_mode = model.observation_log_prob_jax(y_t, eta_mode, phi, rho_r, u_t, R_mode)
     log_predictive = ll_mode - 0.5 * (z @ z) - 0.5 * logdet_spd(A, jitter=jitter)
 
     # One-step-ahead response prediction is evaluated at the predicted state.
@@ -157,3 +157,4 @@ def rts_smoother_jax(filtered_mean, filtered_covariance, predicted_mean, predict
     xs = (filtered_mean[:-1], filtered_covariance[:-1], predicted_mean[1:], predicted_covariance[1:], transition_jacobian[:-1])
     _, (m_rev, P_rev) = jax.lax.scan(step, init, xs, reverse=True)
     return (jnp.concatenate([m_rev, filtered_mean[-1][None, :]], axis=0), jnp.concatenate([P_rev, filtered_covariance[-1][None, :, :]], axis=0))
+

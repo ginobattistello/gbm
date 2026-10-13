@@ -120,10 +120,41 @@ function is an error, since that would declare parameters nothing can use.
 
 `initial_state` can be omitted as well. It defaults to `[0.0]`, and with no
 evolution the state never changes, so an observation function that ignores `x`
-gives the same fit whatever it holds — the value is inert. It is still carried
-because the trial recursion `x_t -> observation -> evolution -> x_{t+1}` needs a
-state to thread through; set it only when the observation function actually
-reads `x`.
+gives the same fit whatever it holds. Deterministic observation-only models
+evaluate independent trials together using `jax.vmap`; the constant state is
+broadcast for reporting. Set it when the observation function actually reads
+`x`. Initial-state or process uncertainty still requires filtering.
+
+## Fitting performance
+
+Observation-only models with no state uncertainty use vectorized likelihoods.
+Scalar and diagonal Gaussian noise use direct elementwise likelihoods.
+Validation reuses the optimizer's compiled value-and-gradient function, data
+are prepared once per subject, and final predictions use a cached evaluator.
+Compilation is shared when only prior values change, including HBI updates.
+
+Optimization uses prior-scaled coordinates by default. Full Cholesky scaling
+is used without hard bounds; diagonal scaling preserves box bounds when they
+are supplied. Return values, Hessians, covariance, and evidence remain in the
+original parameter coordinates. To compare with the previous search geometry:
+
+```python
+config = Config(num_init=1, parameter_scaling=False, verbose=False)
+fit = individual_fit(data, model, config=config)
+```
+
+For timing, use `fit.profile.timings` (validation, preflight, total) and
+`fit.math.diagnostics[subject].timings` (first objective, optimization,
+Hessian, predictions, latent uncertainty, and totals). The preflight timer
+includes compilation of the first objective/gradient. The Hessian and prediction
+timers include their first compilation when needed. `n_evaluations` records
+SciPy's objective requests, and each start records its own count and runtime.
+Trials with different array shapes can require separate compilations.
+
+See [the manual](docs/MANUAL.md#fitting-performance-and-optimizer-coordinates)
+for mathematical details and [validation](docs/VALIDATION.md#performance-update-validation)
+for checks and measured before/after timings. Run the reproducible benchmark
+with `python gbmtoolbox/dev/13_fit_performance.py`.
 
 ## Data
 
@@ -431,3 +462,4 @@ claim that this review is exhaustive. Contributions of every kind are therefore
 warmly encouraged: bug reports, independent replication, method review,
 corrections to the mathematics or the documentation, additional validation cases,
 and critical reading of the present work. Please open an issue or a pull request.
+

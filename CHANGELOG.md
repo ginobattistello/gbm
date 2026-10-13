@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Fitting performance (2026-10-13)
+
+- Vectorize deterministic observation-only trials with `jax.vmap`; dynamic or
+  uncertain states retain sequential evaluation/filtering.
+- Use normalized elementwise Gaussian likelihoods for scalar/diagonal noise.
+- Share compiled objectives across compatible models, passing Gaussian and
+  exact Gamma prior values dynamically. Reuse the optimizer executable for
+  preflight validation and cache full prediction/propagation evaluators.
+- Prepare subject data once per fit and reuse warmed objective results.
+- Add `Config(parameter_scaling=True)`: Cholesky scaling without bounds,
+  diagonal scaling with bounds. Returned Hessians, covariance, gradients,
+  search paths, and evidence use original parameter coordinates.
+- Record stage timings and per-start SciPy evaluation counts and runtimes.
+- Add analytic/equivalence tests and `dev/13_fit_performance.py` for cold/warm
+  timing measurements.
+- Fix three existing Gamma-noise inconsistencies: missing fit-input prior
+  metadata, Gaussian-proxy prior-predictive sampling, and proxy rather than
+  exact local prior curvature in the information diagnostic. These do not
+  change the fitting prior or evidence formula.
+- Document execution paths, cache assumptions, scaling effects on convergence,
+  numerical invariance checks, and impact on BMS/HBI in the manual.
+
 ### Added
 
 - Observation-only models. `StateModel.evolution` and `Priors.evolution` are
@@ -113,3 +135,4 @@
 - Convergence, Hessian, prior-information and numerical local-identifiability diagnostics.
 - Prior/posterior predictive checks and prior sensitivity.
 - Random-effects BMS plus a compact HBI-inspired hierarchical empirical-Bayes/Laplace refitting implementation.
+

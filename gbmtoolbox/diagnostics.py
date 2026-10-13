@@ -210,10 +210,12 @@ def posterior_hessian_diagnostics(fit, subject: int = 0) -> HessianDiagnostics:
 def prior_preconditioned_information(fit, subject: int = 0) -> DataInformationSpectrum:
     """Spectrum of the likelihood information measured in prior units.
 
-    The likelihood information is recovered as ``H_post - prior precision`` and
+    The likelihood information is recovered as ``H_post - local prior curvature`` and
     then whitened by the prior covariance, which makes its eigenvalues
     comparable across parameters on different scales: an eigenvalue above 1 is
     a direction the data constrains more tightly than the prior does.
+    Gamma log-SD moment covariance supplies the scale, while its exact local
+    curvature is subtracted to isolate the likelihood.
     """
     free = fit.math.free_mask[subject]
     Hpost = np.asarray(fit.math.hessian[subject], dtype=float)
@@ -221,6 +223,17 @@ def prior_preconditioned_information(fit, subject: int = 0) -> DataInformationSp
     if Hpost.size == 0:
         return DataInformationSpectrum(np.zeros(0), np.zeros((0, 0)), tuple(), False, np.zeros(0, dtype=bool))
     P0 = np.linalg.inv(Sigma0)
+    # Moment covariance defines the reporting scale. Subtract the actual
+    # local prior curvature, not the Gaussian moment proxy, for Gamma noise.
+    from .priors import GammaPrecisionPrior
+    layout = fit.model.parameter_layout
+    prior = layout.observation_noise_prior
+    if isinstance(prior, GammaPrecisionPrior):
+        full_idx = np.arange(layout.observation_noise_slice.start, layout.observation_noise_slice.stop)
+        free_idx = np.flatnonzero(free)
+        positions = np.searchsorted(free_idx, full_idx)
+        rho = fit.output.parameters[subject, full_idx]
+        P0[positions, positions] = 4.0 * prior.rate * np.exp(-2.0 * rho)
     Hlik = 0.5 * ((Hpost - P0) + (Hpost - P0).T)
     vals0, vecs0 = np.linalg.eigh(Sigma0)
     sqrtS = vecs0 @ np.diag(np.sqrt(vals0)) @ vecs0.T
@@ -406,3 +419,4 @@ def observation_noise_correction(fit, subject: int = 0) -> ObservationNoiseCorre
         inflation_factor=inflation,
         valid=True,
     )
+

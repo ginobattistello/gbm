@@ -156,9 +156,10 @@ model = StateModel(
 $\theta$ is then an empty vector and only the observation parameters are
 estimated. `initial_state` may be omitted too: it defaults to `[0.0]`, and
 with no evolution the state never changes, so an observation function that
-ignores $x$ gives the same fit whatever it holds. The state is still carried
-because the trial recursion needs something to thread through; set it only when
-the observation function actually reads $x$.
+ignores $x$ gives the same fit whatever it holds. Independent deterministic
+trials are evaluated with `jax.vmap`, and the constant state is broadcast for
+reporting. Set it when the observation function reads $x$. A stochastic state
+still requires filtering even when no evolution function is supplied.
 
 Declaring an evolution prior without an evolution function is an error, since
 that would announce parameters nothing can use.
@@ -355,6 +356,93 @@ $$\hat{p} = \arg\max_{p}\ \log p(y \mid p) + \log p(p)$$
 
 Search is multi-start L-BFGS-B, from several starting points, keeping the best
 optimum found. The default is four starts (`Config(num_init=...)`).
+
+### Fitting performance and optimizer coordinates
+
+Deterministic observation-only models use `jax.vmap`; models with explicit
+evolution retain `jax.lax.scan`. Every outcome still contributes its normalized
+likelihood. Scalar and diagonal Gaussian covariances use elementwise arithmetic,
+while full or callable covariance specifications retain the general matrix
+likelihood. No filtering approximation, prior density, or evidence formula is
+changed by these execution paths.
+
+`Config(parameter_scaling=True)` is the default. In free parameter space the
+optimizer works with $x=\mu+Bz$. Without hard bounds, $B$ is the Cholesky factor
+of the free prior covariance. With bounds, $B$ is diagonal with the marginal
+prior standard deviations, so each original box constraint maps to a box
+constraint in $z$. Fixed parameters are removed before scaling. For exact Gamma
+noise, prior log-SD moments define only the numerical scale; the objective still
+uses the normalized exact Gamma density and its transformation Jacobian.
+
+The objective is the original log joint evaluated at $x=\mu+Bz$. No coordinate
+Jacobian is added to the optimization target: this is a change of search
+variables, not a different definition of the MAP. If $H_z$ is the observed
+Hessian in optimizer coordinates, the returned Hessian is
+$H_x=B^{-T}H_zB^{-1}$. Evidence uses $H_x$ and the original normalized log prior.
+The finite-difference backend continues to calculate curvature in original
+coordinates. Returned gradients, search paths, starts, covariance, and fitted
+parameters also use original coordinates.
+
+Scaling changes numerical search paths and the effective stopping criterion.
+Nonlinear models can reach a different local optimum. Inspect convergence and
+retain multiple starts where needed; use `parameter_scaling=False` to reproduce
+the previous search geometry. The number of starts, maximum iterations, and
+filter update settings retain their previous defaults.
+
+Objective and full-evaluation caches use immutable execution settings,
+callable identities, parameter block dimensions, and applicable free indices
+rather than model identity. Numerical Gaussian and Gamma prior quantities are
+dynamic arguments, so HBI and prior-sensitivity refits can reuse compilation.
+Changing shapes/dtypes or input dictionary structure can trigger recompilation;
+recreating an observation/evolution callable also creates a different cache
+entry. Subclasses conservatively use model identity. Callables and captured
+settings must remain immutable; construct a new callable/model when those
+settings change. Cache entries hold strong references and persist for the
+Python process, so reusing model functions limits cache growth.
+
+Data are prepared once per subject. Preflight compiles and checks the same
+value-and-gradient executable used by the optimizer, retaining the first
+evaluation. It checks the clipped initial point when hard bounds are supplied.
+Final reporting uses a cached full evaluator; propagated state uncertainty
+uses the same structural caching and prepared data.
+
+Timing fields, in seconds:
+
+| Location | Keys and interpretation |
+| --- | --- |
+| `fit.profile.timings` | `validation` includes host checks/data preparation; `preflight` includes first objective/gradient compilation and evaluation; `total` includes the whole fit and optional plotting. |
+| `fit.math.diagnostics[s].timings` | `first_objective`, `optimization`, `map_components`, `hessian`, `prediction`, `latent_uncertainty`, `optimize_total`, `subject_total`. First-use compilation is included in the relevant stage. |
+| `fit.math.diagnostics[s].n_evaluations` | Sum of SciPy objective requests across starts; cached requests are still counted by SciPy. |
+| `fit.math.diagnostics[s].starts[k]` | `n_evaluations` and `elapsed_seconds` for one start; `gradient_norm` uses original coordinates. |
+
+Stages containing JAX execution synchronize their results before recording
+elapsed time. Totals contain their component stages and should not be added to
+them. Subject totals exclude the shared preflight stage; the first subject's
+`first_objective` is small because preflight retained that result.
+
+```python
+fit = individual_fit(data, model, config=Config(num_init=1, verbose=False))
+print(fit.profile.timings)
+print(fit.math.diagnostics[0].timings)
+print(fit.math.diagnostics[0].n_evaluations)
+```
+
+Impact on discrete models and comparison: deterministic Bernoulli/categorical
+observation-only models share the vectorized path; their logit definitions and
+likelihood normalizations are unchanged. Dynamic and filtered discrete models
+retain sequential inference. BMS uses the same original-coordinate Laplace
+evidence. HBI can reuse compilation as group priors change, while its statistical
+updates remain unchanged. Scaled searches may change which mode is selected;
+this numerical effect can affect evidence and should be checked in nonlinear
+models. Full posterior curvature is still recomputed at the selected MAP.
+
+Three existing Gamma-prior inconsistencies were also corrected: the documented
+`fit.input.observation_noise_prior` metadata is now recorded; prior-predictive
+draws use exact Gamma precisions; and `prior_preconditioned_information` subtracts
+the exact local Gamma prior curvature ($4b\exp(-2\rho)$), rather than the Gaussian
+moment-proxy precision. These change prior-predictive simulations and the
+information diagnostic for Gamma noise, but not the fitting density or evidence.
+Gaussian-prior predictive sampling and discrete-model densities are unchanged.
 
 ### Uncertainty: the Laplace approximation
 
@@ -587,3 +675,4 @@ Background on the Laplace approximation, state-space models and filtering:
 > Särkkä S (2013). *Bayesian Filtering and Smoothing*. Cambridge.
 
 For how each numerical claim here is checked, see [VALIDATION.md](VALIDATION.md).
+

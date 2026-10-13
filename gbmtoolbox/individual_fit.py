@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import copy
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import perf_counter
 from datetime import datetime
 from typing import Any
 
@@ -14,15 +15,27 @@ import numpy as np
 
 from .optimization import Config, OptimizationDiagnostics, OptimizationResult, optimize_map
 
-from .state_model import prepare_subject_data
+from .state_model import prepare_subject_data, filter_settings
 from .validation import validate_fit_spec
+from .priors import GammaPrecisionPrior
 
 _PROPAGATION_CACHE = {}
 
 
+def _noise_prior_description(prior):
+    """Record the resolved distribution rather than only its moment proxy."""
+    if prior is None:
+        return None
+    if isinstance(prior, GammaPrecisionPrior):
+        return {"distribution": "gamma_precision", "shape": prior.shape.copy(), "rate": prior.rate.copy(),
+                "parameterization": "log_standard_deviation", "names": tuple(prior.names or ())}
+    return {"distribution": "gaussian_log_sd", "mean": prior.mean.copy(), "covariance": prior.covariance.copy(),
+            "parameterization": "log_standard_deviation", "names": tuple(prior.names or ())}
+
+
 def _compiled_propagation(model, config):
     """Cache the JAX function that reruns the model at posterior draws."""
-    key = (id(model), int(config.filter_max_iter), float(config.filter_tol), float(config.filter_damping), float(config.filter_jitter))
+    key = (model.execution_key, filter_settings(config))
 
     cached = _PROPAGATION_CACHE.get(key)
     if cached is not None:
@@ -64,6 +77,8 @@ class FitInput:
     observation_noise_slice: slice
     prior_mean: np.ndarray
     prior_covariance: np.ndarray
+    process_noise_prior: dict | None = None
+    observation_noise_prior: dict | None = None
 
 
 @dataclass
@@ -113,6 +128,7 @@ class FitProfile:
 
     datetime: str
     config: Config
+    timings: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -210,7 +226,7 @@ def _sample_static_posterior(opt: OptimizationResult, model, n_samples: int, rng
     return draws
 
 
-def _latent_propagated(opt, model, subject_data, config, rng):
+def _latent_propagated(opt, model, subject_data, config, rng, *, prepared_data=None, run_map=None):
     """Latent uncertainty from rerunning the model at posterior draws."""
     if not opt.diagnostics.laplace_valid:
         warnings.warn(
@@ -218,11 +234,11 @@ def _latent_propagated(opt, model, subject_data, config, rng):
             RuntimeWarning,
             stacklevel=3,
         )
-        return _latent_none(model.evaluate(opt.parameters, subject_data, config=config), model)
+        return _latent_none(run_map if run_map is not None else model.evaluate(opt.parameters, subject_data, config=config, prepared_data=prepared_data), model)
     if opt.diagnostics.laplace_fragile:
         warnings.warn("Laplace posterior is numerically fragile; propagated latent uncertainty may be sensitive.", RuntimeWarning, stacklevel=3)
     draws = _sample_static_posterior(opt, model, config.latent_samples, rng)
-    prepared = prepare_subject_data(subject_data)
+    prepared = prepare_subject_data(subject_data) if prepared_data is None else prepared_data
     propagate = _compiled_propagation(model, config)
     samples = np.asarray(propagate(jnp.asarray(draws, dtype=jnp.float64), prepared), dtype=float)
     mean = np.mean(samples, axis=0)
@@ -250,26 +266,35 @@ def _latent_propagated(opt, model, subject_data, config, rng):
 
 def individual_fit(data, model, *, config: Config | None = None) -> FitResult:
     """Fit every subject under one :class:`~gbmtoolbox.StateModel`."""
+    fit_started = perf_counter()
     if config is None:
         config = Config()
-    validate_fit_spec(data, model, config)
+    validated = validate_fit_spec(data, model, config)
     rng = np.random.default_rng(config.random_state)
     opts = []
     latent = []
     predictions = []
 
     for n, subject in enumerate(data):
-        opt = optimize_map(subject, model, config, rng=rng)
+        subject_started = perf_counter()
+        prepared = validated.prepared_subjects[n]
+        opt = optimize_map(subject, model, config, rng=rng, prepared_data=prepared,
+                           objective_context=validated.objective_context if n == 0 else None)
         opts.append(opt)
-        run_map = model.evaluate(opt.parameters, subject, config=config)
+        prediction_started = perf_counter()
+        run_map = model.evaluate(opt.parameters, subject, config=config, prepared_data=prepared)
         predictions.append(np.asarray(run_map["prediction"], dtype=float))
+        opt.diagnostics.timings["prediction"] = perf_counter()-prediction_started
+        latent_started = perf_counter()
         if config.latent_uncertainty == "propagated":
-            latent_n = _latent_propagated(opt, model, subject, config, rng)
+            latent_n = _latent_propagated(opt, model, subject, config, rng, prepared_data=prepared, run_map=run_map)
         elif config.latent_uncertainty == "filtered":
             latent_n = _latent_filtered(run_map, model)
         else:
             latent_n = _latent_none(run_map, model)
         latent.append(latent_n)
+        opt.diagnostics.timings["latent_uncertainty"] = perf_counter()-latent_started
+        opt.diagnostics.timings["subject_total"] = perf_counter()-subject_started
         if config.verbose:
             status = "valid" if opt.diagnostics.laplace_valid else "INVALID"
             frag = " (fragile)" if opt.diagnostics.laplace_fragile else ""
@@ -292,6 +317,8 @@ def individual_fit(data, model, *, config: Config | None = None) -> FitResult:
             observation_noise_slice=layout.observation_noise_slice,
             prior_mean=layout.mean.copy(),
             prior_covariance=layout.covariance.copy(),
+            process_noise_prior=_noise_prior_description(layout.process_noise_prior),
+            observation_noise_prior=_noise_prior_description(layout.observation_noise_prior),
         ),
         output=FitOutput(
             parameters=parameters,
@@ -314,10 +341,13 @@ def individual_fit(data, model, *, config: Config | None = None) -> FitResult:
             diagnostics=[o.diagnostics for o in opts],
             free_mask=[o.free_mask for o in opts],
         ),
-        profile=FitProfile(datetime=datetime.now().isoformat(timespec="seconds"), config=config),
+        profile=FitProfile(datetime=datetime.now().isoformat(timespec="seconds"), config=config,
+                           timings={**validated.timings}),
         model=model,
         data=copy.deepcopy(data),
     )
     if config.display:
         result.plot(subject=0, display=True)
+    result.profile.timings["total"] = perf_counter()-fit_started
     return result
+
