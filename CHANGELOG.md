@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Extended BMS (2026-10-13)
+
+- Add family inference with balanced default prior mass, exact Dirichlet count
+  aggregation, analytic family mean frequencies, and conditional within-family
+  analyses.
+- Add explicit fixed-profile family null evidence and corresponding family
+  BOR/PXP; do not apply an ad hoc model-to-family BOR correction.
+- Add paired-condition tuple inference, optional factorial condition axes,
+  per-condition reports, and tuple-space allocation guards.
+- Add independent-group comparisons using pooled versus separate RFX bounds,
+  supporting unequal sample sizes, multiple groups, and configurable hypothesis
+  prior odds. Family comparisons normalize within-family evidence mixtures;
+  `group_level="models"` compares the full model-frequency profiles instead.
+- Dispatch these inputs from `bms`; export `bms_conditions`, `bms_groups`,
+  result dataclasses, and the dictionary-style `GroupBMS` compatibility adapter.
+- Keep the original 2D model-only prior and result fields. Two-candidate EP is
+  now analytic; higher-dimensional EP uses seeded, memory-bounded sampling.
+- Add analytic Dirichlet/Beta/mixture references, extended regression tests,
+  a scientific reference script, and an end-to-end example.
+- Document corrected group semantics, family-null assumptions, and differences
+  from the supplied script and VBA source. Preserve disabled parameter scaling.
+
 ### Fitting performance (2026-10-13)
 
 - Vectorize deterministic observation-only trials with `jax.vmap`; dynamic or
@@ -135,4 +157,5 @@
 - Convergence, Hessian, prior-information and numerical local-identifiability diagnostics.
 - Prior/posterior predictive checks and prior sensitivity.
 - Random-effects BMS plus a compact HBI-inspired hierarchical empirical-Bayes/Laplace refitting implementation.
+
 

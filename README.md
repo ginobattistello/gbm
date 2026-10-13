@@ -133,7 +133,8 @@ Validation reuses the optimizer's compiled value-and-gradient function, data
 are prepared once per subject, and final predictions use a cached evaluator.
 Compilation is shared when only prior values change, including HBI updates.
 
-Optimization uses prior-scaled coordinates by default. Full Cholesky scaling
+Prior-scaled optimization is available with `Config(parameter_scaling=True)`;
+it is disabled by default. Full Cholesky scaling
 is used without hard bounds; diagonal scaling preserves box bounds when they
 are supplied. Return values, Hessians, covariance, and evidence remain in the
 original parameter coordinates. To compare with the previous search geometry:
@@ -155,6 +156,51 @@ See [the manual](docs/MANUAL.md#fitting-performance-and-optimizer-coordinates)
 for mathematical details and [validation](docs/VALIDATION.md#performance-update-validation)
 for checks and measured before/after timings. Run the reproducible benchmark
 with `python gbmtoolbox/dev/13_fit_performance.py`.
+
+## Model, family, condition, and group comparison
+
+`bms` accepts a subjects-by-models log-evidence matrix, a
+subjects-by-models-by-conditions array for paired conditions, or a list of
+subjects-by-models matrices for independent groups. Family indices are zero based
+and must form a non-empty, disjoint partition of all model columns.
+
+```python
+from gbmtoolbox import bms, bms_conditions, bms_groups
+
+families = [[0, 1], [2, 3]]
+result = bms(L, families=families, family_names=["learning", "no_learning"])
+print(result.families.model_frequency)
+print(result.families.protected_exceedance_prob)
+
+# L_conditions.shape == (n_subjects, n_models, n_conditions)
+conditions = bms_conditions(L_conditions, families=families)
+print(conditions.pxp)  # protected EP of equal-family tuples
+
+# Unequal group sample sizes are supported.
+groups = bms_groups([L_patients, L_controls], families=families)
+print(groups.probability_equal)      # shared family-frequency profile
+print(groups.probability_different) # separate family-frequency profiles
+```
+
+Existing 2D calls preserve the original model-only prior of one count per
+model. Family analyses default to one total prior count, equally divided over
+families and then their models. Two-candidate exceedance probabilities are
+analytic; larger comparisons use reproducible, memory-bounded sampling.
+
+Condition comparisons enumerate model tuples and require matching subject rows
+and separately integrated condition-specific fits. Group comparisons follow
+VBA's pooled-versus-separate RFX frequency comparison. With families, they
+default to comparing family frequencies, marginalizing uniformly over models
+within each family. Use `group_level="models"` to compare full model-frequency
+profiles with family-balanced priors, as in VBA's group routine.
+
+The supplied dictionary interface is available as `GroupBMS(L, options=...)`.
+For group inputs use `result["p_equal"]`/`result["p_different"]`; these are
+hypothesis probabilities, not exceedance probabilities. The earlier group-tuple
+construction and ad hoc family-BOR adjustment are replaced by explicitly
+specified hypotheses. See [the manual](docs/MANUAL.md#extended-bms)
+for assumptions, factorial conditions, prior choices, and migration details.
+Tutorial: `gbmtoolbox/examples/11_family_condition_group_bms.py`.
 
 ## Data
 
@@ -462,4 +508,5 @@ claim that this review is exhaustive. Contributions of every kind are therefore
 warmly encouraged: bug reports, independent replication, method review,
 corrections to the mathematics or the documentation, additional validation cases,
 and critical reading of the present work. Please open an issue or a pull request.
+
 

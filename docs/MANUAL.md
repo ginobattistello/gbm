@@ -366,7 +366,8 @@ while full or callable covariance specifications retain the general matrix
 likelihood. No filtering approximation, prior density, or evidence formula is
 changed by these execution paths.
 
-`Config(parameter_scaling=True)` is the default. In free parameter space the
+Parameter scaling is disabled by default; enable it with
+`Config(parameter_scaling=True)`. In free parameter space the
 optimizer works with $x=\mu+Bz$. Without hard bounds, $B$ is the Cholesky factor
 of the free prior covariance. With bounds, $B$ is diagonal with the marginal
 prior standard deviations, so each original box constraint maps to a box
@@ -582,6 +583,229 @@ random effect: rather than asking which model wins overall, it estimates the
 proportion of the population each model best describes, which is robust to a
 minority of subjects behaving differently.
 
+### Extended BMS
+
+The extended routine supports model families, paired conditions, factorial
+condition layouts, and independent groups. Model evidence is always provided
+with subjects as the first axis; indices are zero based.
+
+| Input | Main result | Inferential target |
+| --- | --- | --- |
+| `(subjects, models)` | `BMSResult` | Population model frequencies and EP/PXP |
+| Same matrix with `families` | `BMSResult.families` | Aggregated family frequencies and EP/PXP |
+| `(subjects, models, conditions)` ndarray | `ConditionBMSResult` | Prevalence of equal versus unequal condition tuples |
+| List of group matrices | `GroupBMSResult` | Shared versus separate population frequency profiles |
+
+Explicit `bms_conditions` and `bms_groups` functions are also available. A list
+of 2D matrices denotes independent groups; convert paired-condition data to a
+3D ndarray instead. Group sample sizes may differ. Each group must have the same
+model definitions, model order, and comparable model priors. Paired conditions
+must have the same subjects in the same row order. The toolbox can validate
+dimensions and finiteness, but cannot verify subject identities or scientific
+comparability of the fitted models from an evidence array alone.
+
+#### Families and priors
+
+```python
+result = bms(L, families=[[0, 1], [2, 3]],
+             family_names=["learning", "no_learning"], random_state=42)
+print(result.families.model_frequency)
+print(result.families.protected_exceedance_prob)
+```
+
+Families must be non-empty, disjoint, and cover each candidate exactly once.
+Without families, the historical GBM prior is preserved: $\alpha_{0k}=1$.
+With $F$ families and family size $K_f$, the default is
+$\alpha_{0k}=1/(FK_f)$ for $k\in f$, so each family has prior mass $1/F$ and
+the total prior count is one. Explicit `alpha0` overrides this default.
+Prior count affects RFX inference and must be reported. The compatibility
+`GroupBMS` adapter uses VBA's one-total-count default even without families.
+
+Model-frequency posterior parameters are aggregated exactly:
+$a_f=\sum_{k\in f}a_k$. The induced family distribution is Dirichlet with
+these parameters; family frequencies are analytically $a_f/\sum_f a_f$,
+and family responsibilities are sums of model responsibilities. Family EP is
+calculated directly from this smaller Dirichlet distribution rather than by
+allocating and summing a million full model-frequency samples.
+
+The alternative RFX evidence $F_1$ is a mean-field variational lower bound.
+The model null fixes frequencies to $1/K$. The family null fixes each family's
+total mass to $1/F$ and, additionally, models within that family to $1/K_f$:
+
+$$F_{0,f}=\sum_s\log\left[\sum_f\sum_{k\in f}
+\frac{\exp(L_{sk})}{FK_f}\right].$$
+
+This is evaluated exactly using stable log-sum-exp. Family BOR is
+$\operatorname{sigmoid}(F_{0,f}-F_1)$ with equal prior odds for null and
+alternative; family PXP is $(1-\mathrm{BOR}_f)\mathrm{EP}_f+\mathrm{BOR}_f/F$.
+This null fixes the within-family model frequencies rather than integrating
+over unknown within-family profiles. It is therefore stronger than a null
+constraining family totals alone. `result.bor`/`null_log_evidence` retain the
+model null; `result.families.bor`/`null_log_evidence` expose the family null.
+Use the family BOR when reporting family PXP or condition-family PXP.
+
+`result.families.within[f]` is a separate BMS analysis restricted to family $f$,
+with uniform prior counts totaling one. It is conditional on restricting the
+candidate space; it is not the same as the full-model posterior renormalized
+within a family. Set `within_families=False` to skip these extra fits.
+A singleton candidate/family has frequency and EP/PXP one; a structurally
+vacuous one-category BOR is reported as one.
+
+#### Paired and factorial conditions
+
+```python
+out = bms_conditions(L_conditions, families=[[0, 1], [2, 3]])
+print(out.xp, out.pxp)
+print(out.best[0].models)
+print(out.per_condition[0].families.model_frequency)
+```
+
+For $C$ conditions and $K$ models, enumerate $K^C$ model tuples
+$t=(m_1,\ldots,m_C)$ and compute
+$L_{s,t}=\sum_c L_{s,m_c,c}$. A tuple belongs to `equal` when all its models
+are identical, or all belong to the same supplied family. The remaining tuples
+belong to `not_equal`. These two tuple families have equal prior mass and total
+prior count one, regardless of their different sizes. `alpha0` specifies only
+the per-condition analyses; the between-condition hypothesis prior is fixed
+as stated above.
+
+`xp` is the EP that equal tuples are more frequent than unequal tuples;
+`pxp` protects it using the tuple-family BOR. Neither quantity is a posterior
+probability that every subject uses one common model, nor a group-frequency
+equality test. `best` identifies the tuple with highest posterior expected
+frequency, while `per_condition` retains each condition's standard BMS.
+The full arrays are `equal_exceedance_prob`, `equal_protected_exceedance_prob`,
+`bor`, `equal_mask`, and `between`. With one condition the function warns and
+returns standard BMS. With only one model family, equality is vacuous and its
+EP/PXP are one.
+
+Summing log evidences is justified when condition datasets are independent
+conditional on the tuple and their condition-specific parameters are separately
+integrated with independent priors. Fitting shared parameters across conditions
+requires a joint evidence calculation; separate evidences cannot simply be
+summed. Overlapping data must not be counted twice.
+
+A factorial layout contains each zero-based condition index once:
+
+```python
+out = bms_conditions(L_four_conditions, factors=np.array([[0, 1], [2, 3]]))
+print(out.equal_protected_exceedance_prob)  # one result for each axis
+```
+
+For each non-singleton axis, equality requires identical model/family labels
+along that axis at every fixed combination of the other factor levels. The
+original axes are recorded in `factor_axes`; `best[f]` and `between[f]` refer
+to the corresponding comparison. This follows VBA's factorial tuple logic.
+
+Enumeration is exponential. `max_tuples=100000` guards allocation and raises
+before constructing larger spaces. Increasing it is explicit opt-in; it does
+not make a large comparison computationally cheap. Above 10,000 tuples a warning
+is issued. Family aggregation saves EP sampling dimensions, but model-tuple
+posteriors and their model EPs still require the full tuple space.
+
+#### Independent groups
+
+```python
+out = bms_groups([L_patients, L_controls], families=[[0, 1], [2, 3]])
+print(out.probability_equal, out.probability_different)
+print(out.log_bayes_factor)  # positive favors different profiles
+```
+
+Following the statistical construction in `VBA_groupBMC_btwGroups`, compare
+$H_=$ (one population-frequency profile for all groups) with $H_{\ne}$
+(independent group-specific profiles). If $F(L)$ is the RFX variational bound:
+
+$$F_= = F(\operatorname{stack}_g L_g),\qquad
+F_{\ne} = \sum_g F(L_g),\qquad
+\log BF_{\ne,=} = F_{\ne}-F_=.$$
+
+With prior equality probability $\pi_=$, the approximate hypothesis posterior is
+
+$$P(H_=\mid y)=\operatorname{sigmoid}
+\left[F_=-F_{\ne}+\log\frac{\pi_=}{1-\pi_=}\right].$$
+
+`prior_equal=0.5` is the default. The same Dirichlet prior is used under the
+pooled and each separate analysis. This generalizes VBA's two-group test to
+two or more independent groups. It compares entire frequency profiles, so
+groups can have the same winning model while supporting different profiles.
+There are no group model tuples and no group `xp` or `pxp`. The approximation
+uses differences of variational bounds, whose errors can differ across
+hypotheses; interpret the probability accordingly.
+
+Without families, `group_level="auto"` compares model frequencies. With
+families it compares family frequencies, using per-subject family evidences
+
+$$L_{s,f}=\log\left[\frac{1}{K_f}\sum_{k\in f}\exp(L_{s,k})\right].$$
+
+The `-log(K_f)` normalization prevents large families receiving greater
+evidence solely because they contain more models. This specifies uniform model
+selection within a family for each subject; it does not learn a population
+distribution over within-family models. Family-level Dirichlet prior counts
+are sums of the specified/default model prior counts. Use
+`group_level="models"` to retain the full model-frequency comparison with
+family-balanced priors, as VBA's group function does when given families.
+This distinction can change results when groups differ only within a family.
+
+`pooled` and `per_group` retain full model/family reports.
+`comparison_pooled` and `comparison_per_group` identify the fits whose bounds
+were used in the hypothesis comparison. `group_sizes`, `group_names`,
+`comparison_level`, and `prior_equal` record the analysis choices. Irrelevant
+subject-specific evidence constants are removed internally when computing
+BOR and group Bayes factors, while reported evidence values retain the original
+constants.
+
+#### Sampling and migration from the supplied script
+
+EPs for two candidates follow an analytic Beta tail; a single candidate has
+EP one. Larger spaces use seeded Dirichlet draws in blocks bounded to about
+two million entries. Expected frequencies are analytic. For sampled EPs the
+Monte Carlo standard error is at most $0.5/\sqrt{n_{samples}}$ per entry;
+the default 100,000 draws gives an upper bound about 0.0016. The compatibility
+adapter retains the supplied default of one million draws. There is no full
+million-by-model sample allocation for family aggregation.
+
+```python
+from gbmtoolbox import GroupBMS
+out = GroupBMS(L_conditions, options={"families": [[0, 1], [2, 3]]})
+print(out["pxp"])
+groups = GroupBMS([L_patients, L_controls], options={"families": [[0, 1], [2, 3]]})
+print(groups["p_equal"])
+```
+
+Changes from the supplied script:
+
+- Family mean frequencies are exact Dirichlet means, and EPs are computed from
+  aggregated posterior counts.
+- The family-BOR constant adjustment is removed. The explicit fixed family
+  null is used instead. VBA's source computes its family null with an entropy
+  expression based on unweighted model attributions; GBM evaluates the stated
+  fixed-profile mixture exactly. Unequal-family results need not match that
+  source line for line.
+- Condition BOR is the equal/not_equal family BOR, rather than the model-tuple
+  BOR returned by the script's outer dictionary.
+- Group tuples are replaced by the pooled/separate frequency test. Group
+  results use `p_equal`/`p_different`; `xp`/`pxp` have been removed for groups.
+  Native family-level group comparison is explicitly different from VBA's
+  full model-frequency test with family-balanced priors; select
+  `group_level="models"` for the latter.
+- Invalid/overlapping/incomplete families, non-finite evidence, inconsistent
+  group columns, invalid control values, and excessive tuple counts raise clear
+  errors. A single candidate is handled as a degenerate distribution.
+
+The existing 2D API, model-only prior, and first six `BMSResult` fields remain
+available. Binary EP values now use analytic probabilities and therefore may
+differ slightly from previous Monte Carlo estimates even on identical data.
+These features operate on supplied evidence and do not change model fitting,
+noise estimation, parameter-scaling defaults, or HBI parameter updates.
+
+Method references:
+[VBA group BMS documentation](https://mbb-team.github.io/VBA-toolbox/wiki/BMS-for-group-studies/),
+[family BMS source](https://github.com/MBB-team/VBA-toolbox/blob/master/VBA_groupBMC.m),
+[paired-condition source](https://github.com/MBB-team/VBA-toolbox/blob/master/VBA_groupBMC_btwConds.m),
+and [between-group source](https://github.com/MBB-team/VBA-toolbox/blob/master/VBA_groupBMC_btwGroups.m).
+The extension implements their statistical constructions with the differences
+specified above; it is not claimed to be a bit-for-bit MATLAB port.
+
 `hbi_main` implements hierarchical empirical-Bayes refitting: group-level priors
 and individual fits are estimated together, so each subject is regularised
 toward the group while the group is estimated from the subjects. It updates
@@ -675,4 +899,5 @@ Background on the Laplace approximation, state-space models and filtering:
 > Särkkä S (2013). *Bayesian Filtering and Smoothing*. Cambridge.
 
 For how each numerical claim here is checked, see [VALIDATION.md](VALIDATION.md).
+
 

@@ -13,7 +13,77 @@ Where an analytic answer exists, it is the reference. Where it does not, the
 reference is high-accuracy numerical integration or an exactly solvable special
 case. A code-to-code comparison is never treated as validation.
 
-## Running the checks
+## Extended BMS validation (2026-10-13)
+
+Validated against GBM base commit `08cca6504b66c92306ccb89843e47bd2a3eb6ff5`.
+Environment: Linux x86_64, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0,
+JAX/jaxlib 0.4.38, pytest 8.4.2. The complete suite passes **146 tests**,
+including **32 new BMS cases** in `tests/test_bms_extended.py`.
+
+The statistical references are independent mathematical cases:
+
+- **RFX evidence:** finite log-evidence matrices with known model labels to
+  floating-point precision. For counts $n$ and Dirichlet prior $a_0$, the exact
+  evidence is $\log B(a_0+n)-\log B(a_0)$. Both pooled and separate group
+  variational bounds reproduce this integral in the known-label case.
+- **Group hypothesis probability:** compare the pooled Dirichlet integral with
+  the product of independent group integrals and apply the specified prior odds.
+  Tests cover unequal group sizes, more than two groups, nonuniform priors,
+  and different frequency profiles sharing the same winning model.
+- **Binary EP:** compare directly with the Beta survival probability at 0.5.
+- **Family aggregation:** Dirichlet sums have parameters equal to the summed
+  model parameters. Compare analytic family means and EP with an independently
+  sampled full Dirichlet posterior. The sampling check uses fixed seed and
+  tolerances 0.006 (mean) and 0.009 (EP) for 50,000 draws.
+- **Family null:** compare stable log-sum-exp evidence with a directly evaluated
+  normalized finite mixture, including unequal family sizes. Check the BOR/PXP
+  formula and separation between model and family null risks.
+- **Condition tuples:** direct products of per-condition likelihoods, represented
+  as sums of log evidences. Known unequal labels provide an analytic Dirichlet
+  tuple evidence reference. Test tuple membership, balanced hypothesis prior
+  masses, family equality with different within-family models, factorial axis
+  masks, one-condition fallback, and vacuous one-family equality.
+- **Family group comparison:** explicitly marginalize uniform within-family
+  choices with `logsumexp - log(family size)` and compare with the corresponding
+  two-category frequency test. Verify that within-family group differences
+  are separated from differences in family frequencies.
+- **Numerical/API checks:** subject-specific evidence-shift invariance, retained
+  native 2D prior/result interface, dictionary compatibility, seeded sampling,
+  invalid evidence/partitions/controls, and tuple guards before allocation.
+
+`gbmtoolbox/dev/14_bms_families_conditions_groups.py` reports:
+
+| Reference | Absolute error |
+| --- | ---: |
+| Shared-frequency evidence | `0.000e+00` |
+| Separate-frequency evidence | `1.776e-15` |
+| Group hypothesis probability | `4.163e-17` |
+| Binary EP | `0.000e+00` |
+| Family-null mixture evidence | `2.220e-16` |
+| Known condition-tuple evidence | `2.665e-15` |
+
+Criterion: every analytic reference error below `1e-10`. All pass. The existing
+Gamma evidence/Bayes-factor scientific script also passes, as do the existing
+and new BMS examples. Recorded outputs are in `docs/BMS_VALIDATION_RESULTS.json`
+and `docs/BMS_TEST_RESULTS.txt`.
+
+These checks establish correctness in the reference cases, not exactness of
+general mean-field RFX evidence. General group probabilities use differences
+of variational bounds, and their approximation errors need not cancel.
+VBA-style constructions were checked against the official MATLAB sources;
+MATLAB itself was not executed. The exact family-null mixture and native
+family-only group comparison are deliberate differences described in the
+manual. No numerical equivalence to the supplied group-tuple method is claimed.
+
+Run the relevant checks:
+
+```bash
+python -m pytest -q
+python gbmtoolbox/dev/14_bms_families_conditions_groups.py
+python gbmtoolbox/examples/11_family_condition_group_bms.py
+```
+
+## Running all checks
 
 ```bash
 python -m pytest -q                          # merge gate
@@ -378,4 +448,5 @@ Numerical rules the implementation holds itself to:
 - A finite MAP and a valid Laplace approximation are separate outcomes.
 - Discrete-state filtering is approximate and must stay labelled as such.
 - Modeller programming errors should surface, not be silently absorbed.
+
 
