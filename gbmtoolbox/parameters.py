@@ -38,6 +38,7 @@ def default_observation_noise_prior(dim: int) -> GammaPrecisionPrior:
         raise ValueError("observation noise dimension must be a positive integer")
     return GammaPrecisionPrior(np.ones(dim), np.ones(dim), names=_observation_noise_names(dim))
 
+
 def robust_scale(y) -> float:
     """Robust estimate of the scale of ``y`` (``1.4826 * MAD``).
 
@@ -147,6 +148,7 @@ class ParameterLayout:
         if isinstance(self.observation_noise_prior, GammaPrecisionPrior):
             fixed[self.observation_noise_slice] = False
         return fixed
+
     @property
     def free_mask(self) -> np.ndarray:
         """True for parameters the optimiser actually searches over."""
@@ -181,6 +183,7 @@ class ParameterLayout:
         if isinstance(self.observation_noise_prior, GammaPrecisionPrior):
             draws[:, self.observation_noise_slice] = self.observation_noise_prior.sample(rng, n_samples)
         return draws
+
 
 def _block_diag(blocks: list[np.ndarray]) -> np.ndarray:
     """Assemble prior blocks into one block-diagonal covariance."""

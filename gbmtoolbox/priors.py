@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import jax.numpy as jnp
 import numpy as np
+from jax.scipy.special import gammaln
+from scipy.special import digamma, polygamma
 
 
 def _as_mean(value) -> np.ndarray:
@@ -111,10 +114,79 @@ class GaussianPrior:
         return np.isclose(np.diag(self.covariance), 0.0, atol=1e-14, rtol=0.0)
 
 
-def broadcast_prior(prior: GaussianPrior, dim: int, *, prefix: str) -> GaussianPrior:
+@dataclass(frozen=True)
+class GammaPrecisionPrior:
+    """Independent Gamma(shape, rate) precisions, fitted as log standard deviations.
+
+    ``mean`` and ``covariance`` are moments of log SD, not a Gaussian density.
+    All components are free; use a fixed covariance to specify known noise.
+    """
+
+    shape: object = 1.0
+    rate: object = 1.0
+    names: Sequence[str] | None = None
+
+    def __post_init__(self):
+        a, b = np.atleast_1d(self.shape).astype(float), np.atleast_1d(self.rate).astype(float)
+        if a.ndim != 1 or b.ndim != 1 or not a.size or not b.size:
+            raise ValueError("Gamma shape and rate must be non-empty scalars or vectors")
+        try:
+            a, b = (v.copy() for v in np.broadcast_arrays(a, b))
+        except ValueError as exc:
+            raise ValueError("Gamma shape and rate must have compatible dimensions") from exc
+        if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)) or np.any(a <= 0) or np.any(b <= 0):
+            raise ValueError("Gamma shape and rate must be finite and positive")
+        names = None if self.names is None else tuple(str(n) for n in self.names)
+        if names is not None and (len(names) != a.size or len(set(names)) != len(names)):
+            raise ValueError("names must contain one unique entry per Gamma precision")
+        object.__setattr__(self, "shape", a)
+        object.__setattr__(self, "rate", b)
+        object.__setattr__(self, "names", names)
+
+    @property
+    def dim(self) -> int:
+        return int(self.shape.size)
+
+    @property
+    def mean(self) -> np.ndarray:
+        return 0.5 * (np.log(self.rate) - digamma(self.shape))
+
+    @property
+    def covariance(self) -> np.ndarray:
+        return np.diag(0.25 * polygamma(1, self.shape))
+
+    @property
+    def fixed_mask(self) -> np.ndarray:
+        return np.zeros(self.dim, dtype=bool)
+
+    def log_prob_jax(self, rho):
+        """Normalized density in log SD, including |d precision / d rho|."""
+        a, b = jnp.asarray(self.shape), jnp.asarray(self.rate)
+        return jnp.sum(a * jnp.log(b) - gammaln(a) + jnp.log(2.0) - 2.0 * a * rho - b * jnp.exp(-2.0 * rho))
+
+    def sample(self, rng, size=None) -> np.ndarray:
+        """Draw log SDs; ``size`` counts draws, each with a trailing dim axis."""
+        draw_shape = (self.dim,) if size is None else (size, self.dim)
+        precision = rng.gamma(self.shape, 1.0 / self.rate, size=draw_shape)
+        if np.any(precision <= 0) or not np.all(np.isfinite(precision)):
+            raise FloatingPointError("Gamma precision sampling underflowed or overflowed; check shape/rate")
+        return -0.5 * np.log(precision)
+
+
+def broadcast_prior(prior: GaussianPrior | GammaPrecisionPrior, dim: int, *, prefix: str) -> GaussianPrior | GammaPrecisionPrior:
     """Broadcast a one-dimensional prior independently over ``dim`` entries."""
     if dim < 1:
         raise ValueError("broadcast dimension must be >= 1")
+    if isinstance(prior, GammaPrecisionPrior):
+        if prior.dim not in {1, dim}:
+            raise ValueError(f"{prefix} prior must have dimension 1 or {dim}")
+        if prior.names is None:
+            names = [f"{prefix}[{i}]" for i in range(dim)]
+        elif prior.dim == dim:
+            names = prior.names
+        else:
+            names = [f"{prior.names[0]}[{i}]" for i in range(dim)]
+        return GammaPrecisionPrior(np.broadcast_to(prior.shape, (dim,)), np.broadcast_to(prior.rate, (dim,)), names)
     if prior.dim == dim:
         if prior.names is None:
             return GaussianPrior(prior.mean, prior.covariance, names=[f"{prefix}[{i}]" for i in range(dim)])

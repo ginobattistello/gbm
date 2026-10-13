@@ -152,8 +152,7 @@ def _free_space(layout):
     """Reduce the prior to the free parameters the optimiser searches."""
     mean = np.asarray(layout.mean, dtype=float)
     covariance = np.asarray(layout.covariance, dtype=float)
-    fixed_mask = np.isclose(np.diag(covariance), 0.0, atol=1e-14, rtol=0.0)
-    free_mask = ~fixed_mask
+    free_mask = layout.free_mask
     free_mean = mean[free_mask]
     free_covariance = covariance[np.ix_(free_mask, free_mask)]
     if free_covariance.size:
@@ -270,6 +269,7 @@ def _compiled_objective_functions(model, free_idx, config):
         delta = x - free_prior_mean
         quadratic = delta @ prior_precision @ delta
         logprior = -0.5 * (d * jnp.log(2.0 * jnp.pi) + logdet_prior_covariance + quadratic)
+        logprior = logprior + model.parameter_layout.log_prior_correction_jax(full)
         return loglik, logprior
 
     def negative_log_joint(x, full_prior_mean, free_prior_mean, prior_precision, logdet_prior_covariance, prepared_data):
