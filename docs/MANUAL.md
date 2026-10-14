@@ -75,8 +75,8 @@ def observation(x, phi, u_t):
 | Family | Return from `observation` | Observation model |
 |---|---|---|
 | `gaussian` | Mean $\mu_t$ | $y_t\sim\mathcal N(\mu_t,R_t)$ |
-| `bernoulli` | Logit $\eta_t$ | $P(y_t=1)=\operatorname{sigmoid}(\eta_t)$ |
-| `categorical` | Vector of logits $\eta_t$ | $P(y_t=k)=\operatorname{softmax}(\eta_t)_k$ |
+| `bernoulli` | Logit $\eta_t$ | $P(y_t=1)=\mathrm{sigmoid}(\eta_t)$ |
+| `categorical` | Vector of logits $\eta_t$ | $P(y_t=k)=\mathrm{softmax}(\eta_t)_k$ |
 
 Do not return probabilities for discrete outcomes: GBM would apply the link
 again. “Observation predictor” is the common term; a Gaussian mean is not in
@@ -168,8 +168,8 @@ State covariances may be positive semidefinite; Gaussian observation covariance
 must be positive definite. Scalars mean variance times identity. Initial-state
 covariance is not automatically estimated and does not accept a callable or
 `"diagonal"` mode. Estimated process noise requires an explicit Gaussian prior
-on log-SDs. The estimated forms are $Q=\operatorname{diag}(e^{2\rho_Q})$ and
-$R=\operatorname{diag}(e^{2\rho_R})$. A callable permits parameter/input-dependent
+on log-SDs. The estimated forms are $Q=\mathrm{diag}(e^{2\rho_Q})$ and
+$R=\mathrm{diag}(e^{2\rho_R})$. A callable permits parameter/input-dependent
 covariance, but must remain valid over the parameter region being evaluated.
 Binary/categorical outcomes do not use an additional observation covariance.
 
@@ -177,7 +177,7 @@ Binary/categorical outcomes do not use an additional observation covariance.
 
 Omitting observation covariance estimates noise under independent precisions
 
-$$\lambda_j=\sigma_j^{-2}\sim\operatorname{Gamma}(a_j,b_j),\qquad a_j=b_j=1,$$
+$$\lambda_j=\sigma_j^{-2}\sim\mathrm{Gamma}(a_j,b_j),\qquad a_j=b_j=1,$$
 
 with **shape and rate**. The fitted coordinate is $\rho_j=\log\sigma_j$, whose
 normalized log density includes the change-of-variables Jacobian:
@@ -187,7 +187,7 @@ $$\log p(\rho_j)=a_j\log b_j-\log\Gamma(a_j)+\log2
 
 Its negative log-prior curvature is $4b_j e^{-2\rho_j}$. Its moments are
 $E[\rho_j]=(\log b_j-\psi(a_j))/2$ and
-$\operatorname{Var}(\rho_j)=\psi_1(a_j)/4$. These moments scale optimizer
+$\mathrm{Var}(\rho_j)=\psi_1(a_j)/4$. These moments scale optimizer
 proposals; they do not replace the exact density with a Gaussian.
 At $a=b=1$, they are about 0.2886 and 0.4112. The central 95% SD interval is
 about `[0.52, 6.29]`; mean variance is infinite. Use quantiles to describe this prior.
@@ -275,7 +275,7 @@ or a method that integrates the intended constrained distribution.
 For fixed scalar predictions and deterministic states, let
 $S=\sum_t(y_t-\mu_t)^2$, $A=a+T/2$, $B=b+S/2$. Then
 
-$$\lambda\mid y\sim\operatorname{Gamma}(A,B),\quad
+$$\lambda\mid y\sim\mathrm{Gamma}(A,B),\quad
 \hat\rho=\tfrac12\log(B/A),\quad H_{\rho\rho}=4A,$$
 
 $$\log Z=-\tfrac T2\log(2\pi)+a\log b-\log\Gamma(a)
@@ -327,7 +327,7 @@ this is not the ordinary EKF. The current Gaussian branch does not use
 Write $x=m+Ps$ to preserve a possibly singular state support. At the current
 $x$, let $\ell(x)=\log p(y_t\mid x,w)$, $v=\nabla_x\ell(x)$ and
 $C=J^\top WJ$, where $J$ differentiates the logits and $W$ is their Fisher
-information: $p(1-p)$ for Bernoulli or $\operatorname{diag}(p)-pp^\top$ for
+information: $p(1-p)$ for Bernoulli or $\mathrm{diag}(p)-pp^\top$ for
 categorical observations. With damping $d_f$ and jitter $\epsilon$, the code uses
 
 $$s\leftarrow s+d_f[(1+\epsilon)I+CP]^{-1}(v-s).$$
@@ -335,7 +335,7 @@ $$s\leftarrow s+d_f[(1+\epsilon)I+CP]^{-1}(v-s).$$
 After at most `filter_max_iter` iterations, the approximate covariance and
 predictive log likelihood are
 
-$$P^+=\operatorname{sym}\{[(1+\epsilon)I+PC]^{-1}P\},$$
+$$P^+=\mathrm{sym}\{[(1+\epsilon)I+PC]^{-1}P\},$$
 $$\log\widetilde p(y_t)=\ell(m+Ps)-\tfrac12s^\top Ps
 -\tfrac12\log\det[(1+\epsilon)I+PC].$$
 
@@ -385,8 +385,8 @@ Propagated draws rerun the model with the **observed** outcomes. For stochastic
 models they rerun the filter and retain its state means; they do not draw state
 paths. They omit the conditional variance contribution in
 
-$$\operatorname{Var}(x_t\mid y)=
-E_w[\operatorname{Var}(x_t\mid y,w)]+\operatorname{Var}_w[E(x_t\mid y,w)].$$
+$$\mathrm{Var}(x_t\mid y)=
+E_w[\mathrm{Var}(x_t\mid y,w)]+\mathrm{Var}_w[E(x_t\mid y,w)].$$
 
 This identity explains the two sources of uncertainty. GBM propagates filtered
 means rather than smoothed means, so it does not compute the full-data second
@@ -500,8 +500,8 @@ Use defensible normalized priors and inspect every subject's fit first.
 
 Let $L_{sk}$ be subject $s$'s log evidence for model $k$. The population model is
 
-$$r\sim\operatorname{Dirichlet}(\alpha_0),\quad
-z_s\mid r\sim\operatorname{Categorical}(r),\quad
+$$r\sim\mathrm{Dirichlet}(\alpha_0),\quad
+z_s\mid r\sim\mathrm{Categorical}(r),\quad
 p(y_s\mid z_s=k)=e^{L_{sk}}.$$
 
 Mean-field inference alternates responsibilities and counts:
@@ -523,7 +523,7 @@ frequency information. Weak nonconstant rows can still suffer mean-field bias.
 
 The alternative's `log_evidence` is a variational lower bound for model-only
 BMS. The null is $F_0=\sum_s\log[(1/K)\sum_ke^{L_{sk}}]$ and
-$\mathrm{BOR}=\operatorname{sigmoid}(F_0-F_1)$. Approximation errors in bounds
+$\mathrm{BOR}=\mathrm{sigmoid}(F_0-F_1)$. Approximation errors in bounds
 need not cancel in hypothesis odds. EP is not the probability that a model is
 universally true or that every subject uses it.
 
@@ -547,7 +547,7 @@ unequal family sizes and small prior counts can produce large mean-field bias.
 **Marginal:** integrate a uniformly chosen within-family model separately for
 each subject, then infer family frequencies:
 
-$$L_{sf}=\operatorname{logsumexp}_{k\in f}L_{sk}-\log K_f,\qquad
+$$L_{sf}=\mathrm{logsumexp}_{k\in f}L_{sk}-\log K_f,\qquad
 \alpha_{0f}=\sum_{k\in f}\alpha_{0k}.$$
 
 This does not estimate population frequencies within each family. Select it
@@ -606,9 +606,9 @@ returns ordinary BMS; one family makes equality vacuous.
 It compares one shared population-frequency profile ($H_=$) against separate
 profiles ($H_{\ne}$):
 
-$$F_=F(\operatorname{stack}_g L_g),\quad F_{\ne}=\sum_gF(L_g),\quad
+$$F_=F(\mathrm{stack}_g L_g),\quad F_{\ne}=\sum_gF(L_g),\quad
 \log BF_{\ne,=}=F_{\ne}-F_=,$$
-$$P(H_=\mid y)=\operatorname{sigmoid}[F_=-F_{\ne}+\log(\pi_=/(1-\pi_=))].$$
+$$P(H_=\mid y)=\mathrm{sigmoid}[F_=-F_{\ne}+\log(\pi_=/(1-\pi_=))].$$
 
 `prior_equal=0.5` sets $\pi_=$; each profile has the same specified Dirichlet
 prior. Two comparison categories use integrated frequency evidence; larger
