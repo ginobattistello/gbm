@@ -45,7 +45,7 @@ class BMSResult:
 
 @dataclass
 class FamilyBMSResult:
-    """Family inference using marginal evidence (default) or aggregation.
+    """Family inference using aggregation (default) or marginal evidence.
 
     The null fixes family mass at 1/F and model mass within each family at
     1/size. Within-family fits are separate conditional analyses. For two
@@ -291,10 +291,10 @@ def _partition(families, K, family_names=None):
 
 
 def _prior(alpha0, K, parts):
-    """Dirichlet prior counts: explicit, one per model, or family balanced."""
+    """Dirichlet prior counts: explicit, or one total count balanced across models/families."""
     if alpha0 is None:
         if parts is None:
-            return np.ones(K)
+            return np.ones(K) / K
         prior = np.empty(K)
         for idx in parts:
             prior[idx] = 1.0 / (len(parts) * len(idx))
@@ -358,7 +358,7 @@ def _bms_matrix(
     random_state=42,
     tol=1e-6,
     maxiter=10000,
-    family_method="marginal",
+    family_method="aggregate",
 ):
     """Random-effects BMS on one subjects-by-models matrix, with optional families."""
     L = _matrix(lme)
@@ -504,10 +504,10 @@ def bms(
     within_families=True,
     factors=None,
     max_tuples=100000,
-    group_level="auto",
+    group_level="models",
     prior_equal=0.5,
     group_names=None,
-    family_method="marginal",
+    family_method="aggregate",
 ):
     """Dispatch BMS by data shape, keeping the existing 2D model API.
 
@@ -515,9 +515,9 @@ def bms(
     * 3D ndarray: (subjects, models, paired conditions).
     * list/tuple of 2D arrays: independent groups, possibly unequal sizes.
 
-    With no families the original alpha0=ones(K) default is preserved. With
-    families the default is 1/(F*family_size), one prior count in total.
-    All family and factorial condition indices are zero based.
+    The default is one prior count in total: 1/K without families,
+    or 1/(F*family_size) with families. Family inference defaults to
+    aggregation; independent-group comparisons default to model frequencies.
     """
     common = dict(
         alpha0=alpha0,
@@ -574,7 +574,7 @@ def bms_conditions(
     random_state=42,
     tol=1e-6,
     maxiter=10000,
-    family_method="marginal",
+    family_method="aggregate",
 ):
     """VBA-style paired-condition tuple/family inference.
 
@@ -664,7 +664,7 @@ def bms_groups(
     families=None,
     family_names=None,
     alpha0=None,
-    group_level="auto",
+    group_level="models",
     prior_equal=0.5,
     group_names=None,
     within_families=True,
@@ -672,15 +672,14 @@ def bms_groups(
     random_state=42,
     tol=1e-6,
     maxiter=10000,
-    family_method="marginal",
+    family_method="aggregate",
 ):
     """Shared versus separate frequency profiles for independent groups.
 
-    Without families, compare model frequencies. With families, auto compares
-    family frequencies after uniform within-family evidence marginalization:
-    log p(y|family) = logsumexp(log p(y|model)) - log(family size).
-    group_level='models' instead retains the full model-frequency comparison,
-    with family-balanced model priors (the VBA-style group calculation).
+    Model-frequency comparison is the default, including when families are
+    supplied. group_level='families' compares family frequencies using uniform
+    within-family evidence marginalization. group_level='auto' selects families
+    when supplied, otherwise models.
     """
     if not isinstance(lmes, (list, tuple)) or len(lmes) < 2:
         raise ValueError("between-group BMS requires a list/tuple of at least two groups")

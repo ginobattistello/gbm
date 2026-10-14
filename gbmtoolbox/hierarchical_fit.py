@@ -13,7 +13,7 @@ from .priors import GaussianPrior, Priors
 
 
 @dataclass(frozen=True)
-class HBIConfig:
+class HierarchicalFitConfig:
     """Stopping rule for the hierarchical refitting loop.
 
     ``tol`` is applied to the change in the group prior between sweeps, so the
@@ -39,7 +39,7 @@ class HBIConfig:
 
 
 @dataclass
-class HBIResult:
+class HierarchicalFitResult:
     """Group-level result: refitted subjects and per-model responsibilities.
 
     ``responsibilities`` is subjects-by-models and each row sums to one;
@@ -110,7 +110,7 @@ def _weighted_block_prior(fit, weights, slc, original_prior: GaussianPrior):
     return GaussianPrior(mu, cov, names=original_prior.names)
 
 
-def hbi_main(data, models, *, fit_config: Config | None = None, hbi_config: HBIConfig | None = None):
+def hierarchical_fit(data, models, *, fit_config: Config | None = None, hbi_config: HierarchicalFitConfig | None = None):
     """Hierarchically refit theta/phi group priors across subjects.
 
     Estimated process/observation-noise priors remain fixed at their model-level
@@ -124,8 +124,8 @@ def hbi_main(data, models, *, fit_config: Config | None = None, hbi_config: HBIC
     else:
         fit_config = replace(fit_config, verbose=False, display=False, latent_uncertainty="none")
     if hbi_config is None:
-        hbi_config = HBIConfig(random_state=fit_config.random_state)
-    # Explicit HBIConfig seed controls the hierarchical call. Otherwise the
+        hbi_config = HierarchicalFitConfig(random_state=fit_config.random_state)
+    # Explicit HierarchicalFitConfig seed controls the hierarchical call. Otherwise the
     # seed is inherited from Config. Each model keeps the same stream between
     # sweeps, avoiding unrelated restart draws changing as priors are updated.
     model_seeds = tuple(int(s.generate_state(1)[0]) for s in np.random.SeedSequence(hbi_config.random_state).spawn(len(models)))
@@ -176,7 +176,7 @@ def hbi_main(data, models, *, fit_config: Config | None = None, hbi_config: HBIC
         group_priors = new_priors
         prev_freq = freq.copy()
 
-    return HBIResult(
+    return HierarchicalFitResult(
         models=list(models),
         fits=fits or [],
         responsibilities=r,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -194,6 +195,16 @@ class StateModel:
             raise ValueError("process_noise_prior is required when process_covariance='diagonal'")
         if self.observation_dim is not None and int(self.observation_dim) < 1:
             raise ValueError("observation_dim must be >= 1")
+        if rmode == "none" and family == "gaussian":
+            warnings.warn(
+                "Gaussian observation covariance was not specified. "
+                "GBM will estimate a diagonal observation covariance R "
+                "using its default observation-noise prior. "
+                "To avoid automatic estimation, explicitly provide "
+                "observation_covariance.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         object.__setattr__(self, "family", family)
         object.__setattr__(self, "initial_state", x0)
@@ -226,13 +237,11 @@ class StateModel:
         """How ``R`` is supplied, resolving an omitted Gaussian ``R`` to ``diagonal``."""
         mode = _mode(self.observation_covariance)
         if mode == "none" and self.family == "gaussian":
-            # Gaussian outcomes have no likelihood without R, so an omitted
-            # observation_covariance means "estimate it" rather than "no noise".
             return "diagonal"
         return mode
 
     @property
-    def resolved_observation_dim(self) -> int:
+    def n_observation_noise_params(self) -> int:
         """Number of estimated observation-noise SDs.
 
         Zero unless ``R`` is being estimated. Otherwise it is ``observation_dim``
@@ -258,7 +267,7 @@ class StateModel:
             self.priors,
             process_noise_dim=self.n_state if self.process_covariance_mode == "diagonal" else 0,
             process_noise_prior=self.process_noise_prior,
-            observation_noise_dim=self.resolved_observation_dim if self.observation_covariance_mode == "diagonal" else 0,
+            observation_noise_dim=self.n_observation_noise_params if self.observation_covariance_mode == "diagonal" else 0,
             observation_noise_prior=self.observation_noise_prior,
         )
 
@@ -266,17 +275,6 @@ class StateModel:
     def n_parameters(self) -> int:
         """Length of the full fitted vector, including any noise parameters."""
         return self.parameter_layout.dim
-
-    def __getstate__(self):
-        """Pickle without the cached ``execution_key``.
-
-        The key holds the ``id`` of this process's callables. Unpickled in a
-        worker, the callables are new objects, so the key is recomputed there
-        rather than risk matching a different model's compiled function.
-        """
-        state = self.__dict__.copy()
-        state.pop("execution_key", None)
-        return state
 
     @cached_property
     def execution_key(self):
@@ -301,7 +299,7 @@ class StateModel:
             self.n_theta,
             self.n_phi,
             self.n_state,
-            self.resolved_observation_dim,
+            self.n_observation_noise_params,
         )
 
     def unpack_parameters(self, parameters):
@@ -355,6 +353,7 @@ class StateModel:
 
     def has_state_uncertainty(self) -> bool:
         """Whether the latent state is stochastic and so needs filtering.
+        -> Is there any uncertainty in the latent states that we need to account for when fitting the model?
 
         True when ``initial_state_covariance`` or ``process_covariance`` is
         non-zero. This decides whether the likelihood runs the filter or the
@@ -420,15 +419,32 @@ class StateModel:
 
     def observation_log_prob_jax(self, y, eta, phi, rho_r, u_t, R=None):
         """Use elementwise Gaussian arithmetic when R is known to be diagonal."""
+        family = get_family(self.family)
+
         if self.family == "gaussian":
-            if self.observation_covariance_mode == "diagonal":
-                return get_family(self.family).diagonal_log_prob(y, eta, rho_r)
-            if self.observation_covariance_mode == "fixed":
+            mode = self.observation_covariance_mode
+
+            if mode == "diagonal":
+                return family.diagonal_log_prob(y, eta, rho_r)
+
+            if mode == "fixed":
                 fixed = np.asarray(self.observation_covariance)
+
                 if fixed.ndim <= 1:
-                    variance = jnp.broadcast_to(jnp.asarray(fixed), eta.shape)
-                    return get_family(self.family).diagonal_log_prob(y, eta, 0.5 * jnp.log(variance))
-        return get_family(self.family).log_prob(y, eta, R)
+                    variance = jnp.broadcast_to(
+                        jnp.asarray(fixed), eta.shape
+                    )
+                elif np.all(fixed == np.diag(np.diag(fixed))):
+                    variance = jnp.asarray(np.diag(fixed))
+                else:
+                    variance = None
+
+                if variance is not None:
+                    return family.diagonal_log_prob(
+                        y, eta, 0.5 * jnp.log(variance)
+                    )
+
+        return family.log_prob(y, eta, R)
 
     def observation_only_run_jax(self, parameters, prepared_data):
         """Independent trials with a known constant state: no sequential scan."""

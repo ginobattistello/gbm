@@ -2,7 +2,6 @@
 
 import jax
 
-# Inference relies on Hessians, covariance inversions and log determinants.
 jax.config.update("jax_enable_x64", True)
 
 from .diagnostics import (
@@ -14,7 +13,7 @@ from .diagnostics import (
     posterior_hessian_diagnostics,
     prior_preconditioned_information,
 )
-from .hbi import HBIConfig, HBIResult, hbi_main
+from .hierarchical_fit import HierarchicalFitConfig, HierarchicalFitResult, hierarchical_fit
 from .individual_fit import FitResult, individual_fit
 from .model_selection import BMSResult, ConditionBMSResult, FamilyBMSResult, GroupBMSResult, bms, bms_conditions, bms_groups
 from .optimization import Config
@@ -33,8 +32,8 @@ __all__ = [
     "GammaPrecisionPrior",
     "GaussianPrior",
     "GroupBMSResult",
-    "HBIConfig",
-    "HBIResult",
+    "HierarchicalFitConfig",
+    "HierarchicalFitResult",
     "ObservationNoiseCorrection",
     "ParameterLayout",
     "Priors",
@@ -43,7 +42,7 @@ __all__ = [
     "bms_conditions",
     "bms_groups",
     "convergence_diagnostics",
-    "hbi_main",
+    "hierarchical_fit",
     "individual_fit",
     "noise_parameter_correlations",
     "numerical_local_identifiability",
@@ -58,4 +57,4 @@ __all__ = [
     "simulate_subject",
 ]
 
-__version__ = "0.2.0.dev0"
+__version__ = "0.2.0"
