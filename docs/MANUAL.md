@@ -294,7 +294,7 @@ when predictions or latent states are also uncertain.
 Filtering is part of likelihood evaluation whenever initial-state or process
 covariance is nonzero, regardless of the requested uncertainty display:
 
-$$p(y_t\mid y_{<t},w)=\int p(y_t\mid x_t,w)\,p(x_t\mid y_{<t},w)\,dx_t$$
+$$p(y_t\mid y_{<t},w)=\int p(y_t\mid x_t,w)\,p(x_t\mid y_{<t},w)\,dx_t.$$
 
 The filter maintains a Gaussian approximation to the predicted state,
 $\mathcal N(m_t,P_t)$. The fitted log likelihood sums its approximate predictive
