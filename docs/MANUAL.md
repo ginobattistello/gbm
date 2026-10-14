@@ -294,10 +294,12 @@ when predictions or latent states are also uncertain.
 Filtering is part of likelihood evaluation whenever initial-state or process
 covariance is nonzero, regardless of the requested uncertainty display:
 
-$$p(y_t\mid y_{<t},w)=\int p(y_t\mid x_t,w)\,p(x_t\mid y_{<t},w)\,dx_t.$$
+$$
+p(y_t\mid y_{1:t-1},w)=\int p(y_t\mid x_t,w)\,p(x_t\mid y_{1:t-1},w)\,dx_t
+$$
 
 The filter maintains a Gaussian approximation to the predicted state,
-$\mathcal N(m_t,P_t)$. The fitted log likelihood sums its approximate predictive
+$\mathcal{N}(m_t,P_t)$. The fitted log likelihood sums its approximate predictive
 log likelihoods. Outer Laplace evidence inherits any inner filtering error;
 state marginalization is not a universal extra penalty.
 
@@ -305,15 +307,22 @@ state marginalization is not a universal extra penalty.
 
 With $J_t=\partial g/\partial x$ evaluated at $m_t$,
 
-$$S_t=J_tP_tJ_t^\top+R_t,\quad K_t=P_tJ_t^\top S_t^{-1},$$
-$$m_t^+=m_t+K_t[y_t-g(m_t)],\quad
-P_t^+=(I-K_tJ_t)P_t(I-K_tJ_t)^\top+K_tR_tK_t^\top.$$
+$$
+S_t=J_tP_tJ_t^\top+R_t,\quad K_t=P_tJ_t^\top S_t^{-1}
+$$
 
-The predictive log likelihood is $\log\mathcal N(y_t;g(m_t),S_t)$.
-For transition Jacobian $F_t$ evaluated at $m_t^+$,
+$$
+m_t^{+}=m_t+K_t[y_t-g(m_t)],\quad
+P_t^{+}=(I-K_tJ_t)P_t(I-K_tJ_t)^\top+K_tR_tK_t^\top
+$$
 
-$$m_{t+1}=f(m_t^+,\theta,u_t,y_t),\qquad
-P_{t+1}=F_tP_t^+F_t^\top+Q_t.$$
+The predictive log likelihood is $\log\mathcal{N}(y_t;g(m_t),S_t)$.
+For transition Jacobian $F_t$ evaluated at $m_t^{+}$,
+
+$$
+m_{t+1}=f(m_t^{+},\theta,u_t,y_t),\qquad
+P_{t+1}=F_tP_t^{+}F_t^\top+Q_t
+$$
 
 These are exact for linear-Gaussian models at default `filter_damping=1`, up
 to floating-point error. Nonlinear evolution or observation gives an EKF
@@ -330,14 +339,21 @@ $C=J^\top WJ$, where $J$ differentiates the logits and $W$ is their Fisher
 information: $p(1-p)$ for Bernoulli or $\mathrm{diag}(p)-pp^\top$ for
 categorical observations. With damping $d_f$ and jitter $\epsilon$, the code uses
 
-$$s\leftarrow s+d_f[(1+\epsilon)I+CP]^{-1}(v-s).$$
+$$
+s\leftarrow s+d_f[(1+\epsilon)I+CP]^{-1}(v-s)
+$$
 
 After at most `filter_max_iter` iterations, the approximate covariance and
 predictive log likelihood are
 
-$$P^+=\mathrm{sym}\{[(1+\epsilon)I+PC]^{-1}P\},$$
-$$\log\widetilde p(y_t)=\ell(m+Ps)-\tfrac12s^\top Ps
--\tfrac12\log\det[(1+\epsilon)I+PC].$$
+$$
+P^{+}=\mathrm{sym}([(1+\epsilon)I+PC]^{-1}P)
+$$
+
+$$
+\log\widetilde{p}(y_t)=\ell(m+Ps)-\frac{1}{2}s^\top Ps
+-\frac{1}{2}\log\det[(1+\epsilon)I+PC]
+$$
 
 At convergence and zero jitter, this is the usual local Laplace calculation
 when the logits are affine in the state. For nonlinear logits, Fisher curvature
