@@ -37,8 +37,8 @@ def _fit(data, model):
     return individual_fit([data], model, config=Config(num_init=2, random_state=0, display=False))
 
 
-def test_correction_matches_unbiased_estimator_for_linear_model():
-    """For a linear model the correction must reproduce SSE/(T-p) exactly.
+def test_correction_matches_one_step_linear_reference():
+    """The one-step diagnostic differs from the unbiased variance estimator.
 
     sum_t J_t Sigma J_t^T = sigma^2 tr(X (X'X)^-1 X') = sigma^2 p, so the
     corrected variance is (SSE + sigma^2 p)/T. At the MAP sigma^2 = SSE/T,
@@ -61,7 +61,7 @@ def test_correction_matches_unbiased_estimator_for_linear_model():
     assert correction.corrected_sd[0] == pytest.approx(expected, rel=2e-2)
 
 
-def test_correction_removes_downward_bias():
+def test_correction_reduces_sd_error_in_this_simulation():
     """Averaged over replicates the corrected SD is closer to the truth."""
     true_sd = 1.0
     residual, corrected = [], []
@@ -178,3 +178,20 @@ def test_stochastic_latent_state_is_not_corrected():
     out = observation_noise_correction(fit)
     assert not out.valid
     assert out.corrected_sd.size == 0
+
+
+def test_residual_energy_matches_exact_gaussian_posterior():
+    """Known R gives an exact posterior reference, including prior shrinkage."""
+    X = np.column_stack([np.ones(12), np.linspace(-1, 1, 12)])
+    y = X @ np.array([0.4, 0.8]) + np.sin(np.arange(12)) * 0.2
+    model = StateModel(
+        observation=lambda x, phi, u: u @ phi,
+        priors=Priors(observation=GaussianPrior([0., 0.], [2., 2.])),
+        observation_covariance=0.25,
+    )
+    fit = individual_fit(y, model, u=X, config=Config(num_init=1, verbose=False))
+    exact_cov = np.linalg.inv(4 * X.T @ X + np.eye(2) / 2)
+    exact_mean = exact_cov @ (4 * X.T @ y)
+    expected_energy = np.sum((y - X @ exact_mean)**2) + np.trace(X @ exact_cov @ X.T)
+    diagnostic = observation_noise_correction(fit)
+    assert diagnostic.corrected_sd[0]**2 == pytest.approx(expected_energy / len(y), rel=1e-6)

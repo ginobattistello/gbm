@@ -12,11 +12,11 @@ from gbmtoolbox import (
     Config,
     GammaPrecisionPrior,
     GaussianPrior,
-    HBIConfig,
+    HierarchicalFitConfig,
     Priors,
     StateModel,
     bms,
-    hbi_main,
+    hierarchical_fit,
     individual_fit,
     prior_preconditioned_information,
     prior_predictive,
@@ -122,7 +122,7 @@ def test_hbi_preserves_exact_noise_prior_during_scientific_prior_updates():
     prior = GammaPrecisionPrior(shape=2, rate=0.5)
     model = StateModel(observation=lambda x, phi, u: phi[0], priors=Priors(observation=GaussianPrior([0.0], [1.0])), observation_noise_prior=prior)
     data = [{"y": np.array([0.1, 0.4, 0.2, -0.2]), "u": None}]
-    result = hbi_main(data, [model, model], fit_config=Config(num_init=1, verbose=False), hbi_config=HBIConfig(maxiter=2, verbose=False))
+    result = hierarchical_fit(data, [model, model], fit_config=Config(num_init=1, verbose=False), hbi_config=HierarchicalFitConfig(maxiter=2, verbose=False))
     for fit in result.fits:
         resolved = fit.model.parameter_layout.observation_noise_prior
         assert isinstance(resolved, GammaPrecisionPrior)

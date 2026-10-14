@@ -36,7 +36,7 @@ def main():
     errors = {"weak_group_log_bayes_factor": abs(out.log_bayes_factor - (Fd - Fe)), "weak_group_probability": abs(out.probability_equal - expit(Fe - Fd))}
     L = np.tile([0.001, 0.0], (20, 1))
     F, mean, variance = integral(L)
-    families = bms(np.column_stack([L[:, 0], L[:, 1], L[:, 1]]), families=[[0], [1, 2]], n_samples=1000).families
+    families = bms(np.column_stack([L[:, 0], L[:, 1], L[:, 1]]), families=[[0], [1, 2]], family_method="marginal", n_samples=1000).families
     errors.update(
         weak_family_mean=abs(families.model_frequency[0] - mean),
         weak_family_variance=abs(families.frequency_variance[0] - variance),

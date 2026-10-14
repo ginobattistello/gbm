@@ -5,7 +5,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from gbmtoolbox import Config, GaussianPrior, HBIConfig, Priors, StateModel, hbi_main, individual_fit
+from gbmtoolbox import Config, GaussianPrior, HierarchicalFitConfig, Priors, StateModel, hierarchical_fit, individual_fit
 
 
 def binary_model():
@@ -31,16 +31,16 @@ def test_optimizer_and_latent_rng_streams_are_independent_and_reproducible():
 def test_hbi_seed_is_used_and_inherits_config_seed_when_not_supplied():
     data = [{"y": np.tile([0, 1], 3), "u": None}]
     fit_cfg = Config(num_init=2, random_state=101, verbose=False)
-    config = HBIConfig(maxiter=1, random_state=73, verbose=False)
-    a = hbi_main(data, [binary_model()], fit_config=fit_cfg, hbi_config=config)
-    b = hbi_main(data, [binary_model()], fit_config=fit_cfg, hbi_config=config)
-    c = hbi_main(data, [binary_model()], fit_config=fit_cfg, hbi_config=replace(config, random_state=74))
+    config = HierarchicalFitConfig(maxiter=1, random_state=73, verbose=False)
+    a = hierarchical_fit(data, [binary_model()], fit_config=fit_cfg, hbi_config=config)
+    b = hierarchical_fit(data, [binary_model()], fit_config=fit_cfg, hbi_config=config)
+    c = hierarchical_fit(data, [binary_model()], fit_config=fit_cfg, hbi_config=replace(config, random_state=74))
     assert a.model_seeds == b.model_seeds and a.model_seeds != c.model_seeds
     for s, t in zip(a.fits[0].math.diagnostics[0].starts, b.fits[0].math.diagnostics[0].starts):
         np.testing.assert_array_equal(s.initial_parameters, t.initial_parameters)
     expected = tuple(int(s.generate_state(1)[0]) for s in np.random.SeedSequence(101).spawn(1))
-    # Use an inherited HBIConfig with a short loop via the default constructor.
-    inherited = hbi_main(data, [binary_model()], fit_config=fit_cfg)
+    # Use an inherited HierarchicalFitConfig with a short loop via the default constructor.
+    inherited = hierarchical_fit(data, [binary_model()], fit_config=fit_cfg)
     assert inherited.model_seeds == expected
 
 
@@ -49,7 +49,7 @@ def test_invalid_seeds_fail_early(seed):
     with pytest.raises(ValueError, match="random_state"):
         Config(random_state=seed)
     with pytest.raises(ValueError, match="random_state"):
-        HBIConfig(random_state=seed)
+        HierarchicalFitConfig(random_state=seed)
 
 
 def test_parallel_fit_reproduces_sequential_fit_exactly():

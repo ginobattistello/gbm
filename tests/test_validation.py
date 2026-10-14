@@ -89,3 +89,25 @@ def test_latent_sampling_settings_discarded_when_not_propagated():
     cfg = Config(latent_uncertainty="none", latent_samples=55, latent_interval=0.8)
     assert cfg.latent_samples is None
     assert cfg.latent_interval is None
+
+
+@pytest.mark.parametrize("dim", [1, 2])
+def test_estimated_noise_dimension_uses_resolved_layout(dim):
+    """Both scalar and multivariate default-noise fits pass preflight."""
+    model = StateModel(
+        observation=lambda x, phi, u: jnp.zeros(dim),
+        priors=Priors(observation=GaussianPrior.empty()),
+        observation_dim=dim,
+    )
+    y = np.zeros((3, dim))
+    spec = validate_fit_spec([{"y": y}], model, Config(verbose=False))
+    assert spec.n_parameters == dim
+
+
+def test_estimated_noise_dimension_mismatch_has_actionable_error():
+    model = StateModel(
+        observation=lambda x, phi, u: jnp.zeros(2),
+        priors=Priors(observation=GaussianPrior.empty()),
+    )
+    with pytest.raises(ValueError, match="set observation_dim=2"):
+        validate_fit_spec([{"y": np.zeros((3, 2))}], model, Config(verbose=False))

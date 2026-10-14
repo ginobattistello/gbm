@@ -1,6 +1,6 @@
 import numpy as np
 
-from gbmtoolbox import Config, HBIConfig, bms, hbi_main, individual_fit, posterior_predictive, prior_predictive
+from gbmtoolbox import Config, HierarchicalFitConfig, bms, hierarchical_fit, individual_fit, posterior_predictive, prior_predictive
 
 
 def test_predictive_checks(binary_model, binary_data):
@@ -25,8 +25,8 @@ def test_hbi_runs_single_model(binary_model):
     data = []
     for _ in range(3):
         data.append({"y": rng.integers(0, 2, 12), "u": {"reward": rng.integers(0, 2, 12).astype(float)}})
-    out = hbi_main(
-        data, [binary_model], fit_config=Config(num_init=1, verbose=False, random_state=42), hbi_config=HBIConfig(maxiter=2, tol=1e-2, verbose=False)
+    out = hierarchical_fit(
+        data, [binary_model], fit_config=Config(num_init=1, verbose=False, random_state=42), hbi_config=HierarchicalFitConfig(maxiter=2, tol=1e-2, verbose=False)
     )
     assert out.responsibilities.shape == (3, 1)
     np.testing.assert_allclose(out.model_frequency, [1.0])

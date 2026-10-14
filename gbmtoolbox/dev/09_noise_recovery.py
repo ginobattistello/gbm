@@ -45,5 +45,5 @@ q_hat = fit.output.process_noise_sd[0, 0] ** 2
 r_hat = fit.output.observation_noise_sd[0, 0] ** 2
 print(f"true Q={TRUE_Q:.4f}, estimated Q={q_hat:.4f}")
 print(f"true R={TRUE_R:.4f}, estimated R={r_hat:.4f}")
-print("posterior correlation matrix includes joint Q/R curvature:")
+print("posterior covariance matrix includes joint Q/R curvature:")
 print(fit.math.covariance[0])

@@ -4,10 +4,8 @@ For a linear-Gaussian state-space model the EKF implementation must reduce to
 the exact Kalman filter. We compare filtered means, variances, and predictive
 log likelihood trial by trial.
 
-The residual error is set by Config.filter_jitter, the diagonal regularizer
-used in the SPD solves, and scales linearly with it: 1e-9 jitter gives ~2.3e-10
-error, 1e-12 gives ~2.3e-13, and with jitter disabled the filter reproduces the
-exact Kalman recursion to machine precision (~1.1e-16).
+The Gaussian branch does not use filter_jitter. At default damping the
+remaining differences from the exact recursion are floating-point roundoff.
 """
 
 import jax.numpy as jnp

@@ -50,7 +50,8 @@ toolbox against the true generating values:
 | categorical | a2 | 1.0000 | 0.0009 | 0.8597 | 0.8595 |
 | categorical | b2 | 0.9999 | 0.0037 | 0.7847 | 0.7808 |
 
-The two toolboxes agree to 3–4 decimal places on every parameter. The largest
+These historical results show close parameter agreement in these simulations;
+they do not establish agreement to 3–4 decimal places on every parameter. The largest
 residual differences are in the noise SD and in `b2` — the parameters where the
 likelihood is flattest and the prior does the most work. Since both toolboxes
 now default to the same `Ga(1, 1)` noise prior, the noise-SD difference fell
@@ -73,10 +74,10 @@ In GBM Toolbox an observation-only model simply omits the `evolution`
 function and the evolution prior; `theta` is then an empty vector.
 
 Both toolboxes now default to the same `Ga(1, 1)` prior on observation
-precision. GBM Toolbox moment-matches it onto `log_observation_sd`, because it
-estimates noise inside one joint MAP/Laplace vector and the noise posterior is
-much less skewed on the log scale; VBA keeps the Gamma form because its
-variational scheme updates precision as a separate conjugate factor.
+precision. GBM Toolbox evaluates the exact transformed density in `log_observation_sd`,
+including its Jacobian, inside a joint MAP/Laplace fit. VBA updates precision
+as a separate conjugate variational factor. Matching priors does not make
+the posterior approximations or evidence estimates identical.
 
 Note that the observation function returning logits does not hide the
 probabilities: `fit.output.prediction` holds `p(y=1)` for Bernoulli and the

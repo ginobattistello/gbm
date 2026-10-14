@@ -120,9 +120,9 @@ def validate_fit_spec(data, model, config) -> ValidatedSpec:
             ydim = np.asarray(y[0], dtype=float).reshape(-1).size
             if eta1_np.size != ydim:
                 raise ValueError(f"subject {n}: Gaussian outcome dimension {ydim} differs from observation mean dimension {eta1_np.size}")
-            if model.observation_covariance_mode == "diagonal" and model.resolved_observation_dim != eta1_np.size:
+            if model.observation_covariance_mode == "diagonal" and model.n_observation_noise_params != eta1_np.size:
                 raise ValueError(
-                    f"subject {n}: estimated diagonal R has dimension {model.resolved_observation_dim}, "
+                    f"subject {n}: estimated diagonal R has dimension {model.n_observation_noise_params}, "
                     f"but the Gaussian observation returns {eta1_np.size} values. "
                     f"For multivariate Gaussian outcomes set observation_dim={eta1_np.size}, "
                     "or provide a matching vector observation_noise_prior."

@@ -88,7 +88,7 @@ def _weighted_block_prior(fit, weights, slc, original_prior: GaussianPrior):
     for i in range(len(w)):
         full_cov = fit.math.covariance[i]
         if full_cov is None:
-            raise RuntimeError("HBI requires valid subject Laplace covariance")
+            raise RuntimeError("hierarchical_fit requires valid subject Laplace covariance")
         Si = full_cov[slc, slc]
         delta = means[i] - mu
         cov += w[i] * (Si + np.outer(delta, delta))
@@ -147,7 +147,7 @@ def hierarchical_fit(data, models, *, fit_config: Config | None = None, hbi_conf
             fit = individual_fit(data, mk, config=replace(fit_config, random_state=model_seeds[k]))
             for n, diag in enumerate(fit.math.diagnostics):
                 if not diag.laplace_valid:
-                    raise RuntimeError(f"HBI requires a converged MAP and valid Laplace curvature: model {k}, subject {n}")
+                    raise RuntimeError(f"hierarchical_fit requires a converged MAP and valid Laplace curvature: model {k}, subject {n}")
             fits.append(fit)
             lme[:, k] = fit.output.log_evidence
 
@@ -167,7 +167,7 @@ def hierarchical_fit(data, models, *, fit_config: Config | None = None, hbi_conf
         delta_cov = max(_max_change(p.covariance, old.covariance) for p, old in zip(new_priors, group_priors))
         history.append({"iteration": it, "frequency_change": delta_freq, "mean_change": delta_mean, "covariance_change": delta_cov})
         if hbi_config.verbose:
-            print(f"HBI iter {it:02d}: max Δfreq={delta_freq:.3g}, max Δmean={delta_mean:.3g}, max Δcov={delta_cov:.3g}")
+            print(f"hierarchical_fit iter {it:02d}: max Δfreq={delta_freq:.3g}, max Δmean={delta_mean:.3g}, max Δcov={delta_cov:.3g}")
         if max(delta_freq, delta_mean, delta_cov) <= hbi_config.tol:
             converged = True
             break

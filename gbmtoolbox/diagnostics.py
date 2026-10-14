@@ -74,7 +74,7 @@ class LocalIdentifiability:
     """Rank of the prediction Jacobian at the MAP.
 
     A ``nullity`` above zero means some combination of parameters leaves every
-    prediction unchanged, so the data cannot distinguish it;
+    prediction unchanged to first order; it may still change outcome variance;
     ``parameter_directions`` says which combination.
     """
 
@@ -96,8 +96,8 @@ class ObservationNoiseCorrection:
     residual energy under the Laplace posterior.
 
     ``inflation_factor`` is ``corrected_sd / residual_sd``; values meaningfully
-    above 1 mean the model is flexible enough, relative to the number of
-    trials, that the MAP residuals understate the true observation noise.
+    above 1 mean parameter-induced prediction uncertainty adds residual energy.
+    They do not establish the true observation noise or estimator unbiasedness.
     """
 
     residual_sd: np.ndarray
@@ -219,7 +219,8 @@ def prior_preconditioned_information(fit, subject: int = 0) -> DataInformationSp
     The likelihood information is recovered as ``H_post - local prior curvature`` and
     then whitened by the prior covariance, which makes its eigenvalues
     comparable across parameters on different scales: an eigenvalue above 1 is
-    a direction the data constrains more tightly than the prior does.
+    a direction with more local likelihood than prior curvature for Gaussian priors.
+    For Gamma noise, this is instead a global-variance-scaled descriptive index.
     Gamma log-SD moment covariance supplies the scale, while its exact local
     curvature is subtracted to isolate the likelihood.
     """
@@ -291,7 +292,12 @@ def _free_prediction_function(fit, subject: int):
 
 
 def numerical_local_identifiability(fit, subject: int = 0, *, rank_tol=None) -> LocalIdentifiability:
-    """Local prediction identifiability using an exact JAX Jacobian."""
+    """Local prediction sensitivity using an exact JAX Jacobian.
+
+    The public name is retained for compatibility. Rank concerns the reported
+    prediction, not the entire likelihood; covariance parameters can be
+    identifiable even when this Jacobian has a null direction.
+    """
     predictions, idx, x0 = _free_prediction_function(fit, subject)
 
     def flat_predictions(x_free):
@@ -340,52 +346,24 @@ def noise_parameter_correlations(fit, subject: int = 0) -> NoiseCorrelationSumma
 
 
 def observation_noise_correction(fit, subject: int = 0) -> ObservationNoiseCorrection:
-    r"""Observation noise corrected for posterior parameter uncertainty.
+    r"""Linearized posterior residual-energy diagnostic for Gaussian outcomes.
 
-    The MAP estimate of the observation noise is driven by the residuals at the
-    fitted parameters, :math:`r_t = y_t - g_t(\hat\theta)`.  That treats
-    :math:`\hat\theta` as known exactly, so a model flexible enough to absorb
-    part of the noise into its own parameters leaves residuals that are too
-    small and reports an observation SD that is too low.  With few trials, or
-    many parameters, the effect is large: with five free parameters and 25
-    trials the reported SD is biased low by roughly 10%.
+    With residuals r_t and prediction Jacobians J_t at the MAP, compute
+    residual_sd = sqrt(SSE/T) and corrected_sd = sqrt((SSE+U)/T), where
+    U = sum_t J_t Sigma J_t.T. This approximates expected squared residuals
+    under the static Laplace posterior; it is not a general unbiased noise
+    estimator. For nonlinear predictions it omits prediction-curvature terms.
 
-    This diagnostic recomputes the noise from the *expected* residual energy
-    under the Laplace posterior :math:`q(\theta) = N(\hat\theta, \Sigma)`.
-    Linearising the prediction around the MAP,
+    The inflation factor compares these two residual scales, not the fitted
+    reported_sd. Neither a factor near one nor a large factor certifies the
+    fitted noise estimate. Priors, model mismatch and posterior approximation
+    must be assessed separately. No fit or evidence is changed.
 
-    .. math::
-
-        E_q\!\left[\sum_t (y_t - g_t(\theta))^2\right]
-        \approx \sum_t \left(r_t^2 + J_t \Sigma J_t^\top\right),
-
-    where :math:`J_t` is the Jacobian of the trial-``t`` prediction with
-    respect to the free parameters.  The second term is the prediction
-    uncertainty induced by parameter uncertainty; adding it is what turns the
-    MLE-like estimate into the analogue of the unbiased :math:`SSE/(T-p)`.
-
-    ``J`` is obtained by differentiating the model's own trajectory, so this
-    works for models with deterministic latent dynamics too: the derivative
-    propagates through the latent states exactly as the likelihood does.
-    With a stochastic latent state (initial-state or process noise) the
-    residuals are taken at the filter's predicted state, so they also contain
-    latent-state variance and would overstate ``R``; such models return an
-    empty, ``valid=False`` result.
-
-    This is a **diagnostic**: it reports what the noise would be under the
-    correction, and changes neither the fit nor its log-evidence.  A large
-    ``inflation_factor`` means the reported observation SD should not be taken
-    at face value.
-
-    The correction is evaluated once at the MAP, not iterated to
-    self-consistency (the posterior covariance itself depends on the noise
-    scale).  One step removes most of the bias; a small downward bias survives
-    at the smallest trial counts.  See
-    ``gbmtoolbox/dev/11_observation_noise_correction.py`` for the measured
-    behaviour against the analytic result for a linear model.
-
-    Only Gaussian observations have an estimated ``R``; other families return
-    an empty, ``valid=False`` result.
+    The diagnostic requires deterministic Gaussian states and valid covariance
+    with free parameters. It can also describe models with fixed observation
+    covariance. It reports per-output aggregate residual scales, not a full
+    covariance or heteroscedastic noise correction. Stochastic-state residuals
+    also contain state uncertainty, so such models return valid=False.
     """
     model = fit.model
     if model.family != "gaussian" or model.has_state_uncertainty():

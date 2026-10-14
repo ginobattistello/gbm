@@ -67,11 +67,11 @@ def test_family_dirichlet_aggregation_matches_sample_distribution():
     assert np.mean(summed > 0.5) == pytest.approx(expected.exceedance_prob[0], abs=0.009)
 
 
-def test_existing_2d_default_prior_and_list_matrix_dispatch():
+def test_total_one_default_prior_and_list_matrix_dispatch():
     L = [[2.0, 0.0], [3.0, 0.0]]
     result = bms(L, n_samples=1)
     assert isinstance(result, BMSResult)
-    np.testing.assert_array_equal(result.alpha0, [1, 1])
+    np.testing.assert_array_equal(result.alpha0, [0.5, 0.5])
 
 
 def test_condition_tuple_evidence_matches_direct_product():
@@ -147,7 +147,7 @@ def test_same_winning_model_does_not_imply_same_group_frequencies():
 def test_family_group_comparison_normalizes_unequal_family_sizes():
     groups = [np.array([[5, -1, -2], [4, -2, -2], [-2, 4, 3]], dtype=float), np.array([[4, -2, -1], [-2, 5, 5]], dtype=float)]
     parts = [[0], [1, 2]]
-    out = bms_groups(groups, families=parts, n_samples=1000)
+    out = bms_groups(groups, families=parts, group_level="families", n_samples=1000)
     assert out.comparison_level == "families"
     collapsed = [np.column_stack([L[:, 0], logsumexp(L[:, 1:], axis=1) - np.log(2)]) for L in groups]
     direct = bms_groups(collapsed, alpha0=np.array([0.5, 0.5]), n_samples=1)
@@ -159,7 +159,7 @@ def test_family_group_comparison_normalizes_unequal_family_sizes():
 
 def test_between_groups_same_family_different_internal_model():
     groups = [known_assignments([0] * 25, 4), known_assignments([1] * 25, 4)]
-    family = bms_groups(groups, families=[[0, 1], [2, 3]], n_samples=1000)
+    family = bms_groups(groups, families=[[0, 1], [2, 3]], group_level="families", n_samples=1000)
     models = bms_groups(groups, families=[[0, 1], [2, 3]], group_level="models", n_samples=1000)
     assert family.probability_equal > 0.8
     assert models.probability_equal < 0.01
@@ -268,7 +268,7 @@ def test_binary_frequency_integration_matches_single_subject_beta_mixture():
 
 def test_weak_evidence_unequal_families_remains_close_to_the_prior():
     L = np.tile([0.001, 0.0, 0.0], (20, 1))
-    out = bms(L, families=[[0], [1, 2]], n_samples=1000)
+    out = bms(L, families=[[0], [1, 2]], family_method="marginal", n_samples=1000)
     assert abs(out.families.model_frequency[0] - 0.5) < 0.01
     assert abs(out.families.exceedance_prob[0] - 0.5) < 0.01
     assert out.families.frequency_variance[0] > 0.12
@@ -299,7 +299,18 @@ def test_weak_group_evidence_matches_independent_beta_weighted_integrals():
 def test_exact_family_inference_is_invariant_to_model_duplication():
     first = np.array([[0.01, 0.0], [-0.02, 0.0], [0.03, 0.0]])
     repeated = np.column_stack([first[:, 0], first[:, 1], first[:, 1]])
-    a = bms(first, families=[[0], [1]], n_samples=1)
-    b = bms(repeated, families=[[0], [1, 2]], n_samples=1000)
+    a = bms(first, families=[[0], [1]], family_method="marginal", n_samples=1)
+    b = bms(repeated, families=[[0], [1, 2]], family_method="marginal", n_samples=1000)
     np.testing.assert_allclose(a.families.model_frequency, b.families.model_frequency, atol=1e-13)
     np.testing.assert_allclose(a.families.exceedance_prob, b.families.exceedance_prob, atol=1e-13)
+
+
+def test_current_defaults_distinguish_aggregate_reports_and_model_group_odds():
+    L = np.array([[0.01, 0., 0.], [-0.02, 0., 0.]])
+    parts = [[0], [1, 2]]
+    family = bms(L, families=parts, n_samples=10)
+    assert family.families.method == "aggregate"
+    group = bms_groups([L, L], families=parts, n_samples=10)
+    assert group.comparison_level == "models"
+    selected = bms_groups([L, L], families=parts, group_level="auto", n_samples=10)
+    assert selected.comparison_level == "families"

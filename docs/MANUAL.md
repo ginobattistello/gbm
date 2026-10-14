@@ -1,1032 +1,744 @@
-# Manual
+# GBM manual
 
-A guide to fitting generative models of behaviour: what the toolbox estimates,
-the mathematics behind it, and how to express a model in code.
+GBM fits a generative model to observations. You supply predictions and, when
+needed, a state-update rule. It returns parameter estimates, approximate
+uncertainty, state trajectories and model evidence.
 
-## What this toolbox is for
+## Reading guide
 
-You have a theory about how someone solves a task — how they learn from
-feedback, accumulate evidence, or track a changing world. The theory says there
-is something internal that changes trial by trial, and that what you observe on
-each trial depends on that internal quantity. You want to know what values of
-the theory's parameters best explain a participant's data, how certain you can
-be about those values, and whether one theory explains the data better than
-another.
+**First use:** read sections 1–4, then the result checks in section 8.
+**Comparing theories:** also read sections 5, 9 and 10.
+**Stochastic states or method review:** read sections 6–8 and 11–12.
 
-That is what this toolbox does. You supply two functions describing your
-theory; it supplies the estimation machinery: parameter estimates with
-uncertainty, latent-state trajectories, model evidence, diagnostics, and group
-comparison.
+1. [Choose a model](#1-choose-a-model)
+2. [Write the model and supply data](#2-write-the-model-and-supply-data)
+3. [Specify priors and parameter coordinates](#3-specify-priors-and-parameter-coordinates)
+4. [Specify state and observation noise](#4-specify-state-and-observation-noise)
+5. [Understand MAP, uncertainty and evidence](#5-understand-map-uncertainty-and-evidence)
+6. [Understand filtering](#6-understand-filtering)
+7. [Read latent uncertainty and predictive simulations](#7-read-latent-uncertainty-and-predictive-simulations)
+8. [Check a fit](#8-check-a-fit)
+9. [Compare models, families, conditions and groups](#9-compare-models-families-conditions-and-groups)
+10. [Refit subjects hierarchically](#10-refit-subjects-hierarchically)
+11. [Control speed and reproducibility](#11-control-speed-and-reproducibility)
+12. [Report an analysis and find references](#12-report-an-analysis-and-find-references)
 
-## The model
+## 1. Choose a model
 
-Everything is written as a generative state model, which separates three
-things:
+| Your question | Specification | Inference |
+|---|---|---|
+| Does behaviour depend on current inputs? | Observation function only | Independent-trial likelihood |
+| Does behaviour depend on learning/history? | Observation and evolution functions | Deterministic state recursion |
+| Is the state itself noisy or initially uncertain? | Also supply initial/process covariance | Filtering inside the likelihood |
 
-| symbol | meaning |
+“Deterministic state” does not mean deterministic behaviour: outcomes still
+follow their observation distribution. A learning model can have changing
+states without process noise. Do not confuse deterministic/stochastic with
+static/dynamic.
+
+The trial order is **predict the outcome, score the observation, then evolve
+the state**. In a stochastic model, the filter first updates the current state
+using the observation, then propagates that updated state to the next trial.
+
+| Symbol | Meaning |
 |---|---|
-| $x_t$ | the **latent state** — what changes from trial to trial |
-| $\theta$ | **evolution parameters** — static, govern how the state changes |
-| $\phi$ | **observation parameters** — static, govern how the state produces behaviour |
+| $x_t$ | Latent state on trial $t$ |
+| $\theta$, $\phi$ | Evolution and observation parameters |
+| $u_t$, $y_t$ | Known inputs and observed outcome |
+| $Q_t$, $R_t$ | Process and Gaussian observation covariance |
+| $w$ | All free fitted coordinates, including estimated noise log-SDs |
 
-For a reinforcement-learning model, $x_t$ might be the values of the available
-options, $\theta$ the learning rate, and $\phi$ the choice temperature.
+The conditional model is
 
-You write two functions:
+$$x_1\sim\mathcal N(m_1,P_1),\qquad
+x_{t+1}\mid x_t,y_t,u_t,\theta\sim\mathcal N(f(x_t,\theta,u_t,y_t),Q_t).$$
+
+An exactly known initial state or deterministic transition is a point mass.
+The likelihood conditions on the supplied inputs and uses the transition and
+observation factors in trial order. Noise draws are conditionally independent
+under this specification. Inputs must not leak the outcome being predicted;
+for example, feedback can enter evolution without being used to predict the
+choice that preceded that feedback.
+
+## 2. Write the model and supply data
 
 ```python
 def evolution(x, theta, u_t, y_t):
-    """Latent state x_t -> x_{t+1}."""
-
+    # Return the next state; omit this function for observation-only models.
+    ...
 
 def observation(x, phi, u_t):
-    """Latent state x_t -> what is predicted on this trial."""
+    # Return the observation predictor below.
+    ...
 ```
 
-`u_t` is whatever the trial presents — stimuli, rewards, condition codes. It
-carries no reserved field names; the toolbox never requires a field called
-`reward` or `stimulus`. `y_t` is the outcome observed on the current trial.
-
-Each trial runs in this order:
-
-```text
-x_t -> observation -> likelihood of y_t -> evolution -> x_{t+1}
-```
-
-The state is used to predict the trial's outcome *before* it is updated with
-that outcome, so nothing predicts itself.
-
-### What `observation` must return
-
-This is the detail people get wrong most often. The observation function
-returns the **natural parameter** of the outcome distribution, not a
-probability. The toolbox applies the link function itself.
-
-| family | return | not |
+| Family | Return from `observation` | Observation model |
 |---|---|---|
-| Gaussian | predicted mean $\mu_t$ | — |
-| Bernoulli | the **logit**, $\log\frac{p}{1-p}$ | not $p$ |
-| categorical | a vector of **logits** | not a probability vector |
+| `gaussian` | Mean $\mu_t$ | $y_t\sim\mathcal N(\mu_t,R_t)$ |
+| `bernoulli` | Logit $\eta_t$ | $P(y_t=1)=\operatorname{sigmoid}(\eta_t)$ |
+| `categorical` | Vector of logits $\eta_t$ | $P(y_t=k)=\operatorname{softmax}(\eta_t)_k$ |
 
-So a softmax choice rule returns $\beta(Q_1 - Q_0)$, not
-$\sigma\!\left(\beta(Q_1 - Q_0)\right)$. Returning a probability applies the
-sigmoid twice: the model still runs and still fits, but it is not the model you
-wrote. Logits are also numerically better behaved, which is why the toolbox
-works in that parameterisation.
+Do not return probabilities for discrete outcomes: GBM would apply the link
+again. “Observation predictor” is the common term; a Gaussian mean is not in
+general its canonical natural parameter. Categorical logits are invariant to a
+common additive shift; redundant free offsets can create unidentifiable models.
 
-### A complete example
-
-A two-option learning model with a softmax choice rule:
+### A learning model
 
 ```python
 import jax
 import jax.numpy as jnp
 from gbmtoolbox import Config, GaussianPrior, Priors, StateModel, individual_fit
 
-
 def evolution(x, theta, u_t, y_t):
-    alpha = jax.nn.sigmoid(theta[0])  # learning rate in (0, 1)
+    alpha = jax.nn.sigmoid(theta[0])
     choice = y_t.astype(jnp.int32)
-    reward = u_t["reward"]
-    return x.at[choice].add(alpha * (reward - x[choice]))
-
+    return x.at[choice].add(alpha * (u_t["reward"] - x[choice]))
 
 def observation(x, phi, u_t):
-    beta = jnp.exp(phi[0])  # choice temperature > 0
-    return beta * (x[1] - x[0])  # Bernoulli logit
-
+    inverse_temperature = jnp.exp(phi[0])
+    return inverse_temperature * (x[1] - x[0])
 
 model = StateModel(
-    evolution=evolution,
-    observation=observation,
-    family="bernoulli",
+    evolution=evolution, observation=observation, family="bernoulli",
     priors=Priors(
         evolution=GaussianPrior([0.0], [1.0], names=["alpha_raw"]),
         observation=GaussianPrior([1.0], [1.0], names=["log_beta"]),
     ),
-    initial_state=[0.5, 0.5],
-    state_names=["Q0", "Q1"],
+    initial_state=[0.5, 0.5], state_names=["Q0", "Q1"],
 )
-
-fit = individual_fit(data, model, config=Config(latent_uncertainty="propagated"))
+# data: one dictionary per participant, with choice y and reward input u.
+fit = individual_fit(data, model, config=Config(random_state=42))
 ```
 
-This is the Rescorla-Wagner update,
-$Q_{c} \leftarrow Q_{c} + \alpha(r - Q_{c})$, applied to the chosen option.
+This is a chosen-option Rescorla–Wagner update with a binary softmax choice rule.
+The [README](../README.md) contains a complete runnable observation-only example.
+Without `evolution`, omit its prior too; the default state `[0.0]` stays fixed.
+If `observation` ignores that state, its value has no effect.
 
-`data` is a list with one dict per subject, `{"y": outcomes, "u": inputs}`,
-where every array has trials on its first axis and `u` is optional. For one
-subject, the outcome vector can be passed directly, with inputs as a keyword:
-`individual_fit(y, model, u=u)`. `u` may be an array of any dimension (the
-model receives `u[t]`), a dict of such arrays, or omitted. Both forms run the
-same fit, and `fit.data[0]` stores the subject as a dict either way. A stacked
-subjects-by-trials matrix is not accepted, because its rows could equally be
-trials of a multivariate outcome.
+### Data and JAX rules
 
-### Writing model functions
+One subject: `individual_fit(y, model, u=u)`. Several subjects:
+`individual_fit([{"y": y1, "u": u1}, {"y": y2, "u": u2}], model)`.
+Subjects may have different trial counts. Gaussian outcomes have shape `(T,)`
+or `(T, D)`; binary outcomes are 0/1; categorical outcomes are integer labels
+`0, ..., K-1`. Several subjects must be separate dictionaries, not a stacked
+outcome matrix. `u` is optional: `None`, a numeric trialwise array, or a dict
+of numeric arrays with leading dimension `T` (scalar dict values are allowed).
+No input field names are reserved. Missing/nonfinite outcomes are not supported.
 
-Model functions are compiled and differentiated, which imposes a few rules:
+Use `jax.numpy` inside model functions, `.at[...]` for array updates, and
+JAX-compatible indexing/branching. Avoid NumPy operations on traced values,
+Python `int`/`float` casts, in-place mutation and random draws. Functions must
+be deterministic for fixed arguments. Preflight checks catch common errors,
+but do not prove determinism or scientific validity for all inputs.
 
-- Use `jnp` operations, not `np`, inside `evolution` and `observation`.
-- Arrays are immutable: write `x.at[i].add(v)` or `x.at[i].set(v)`, never
-  `x[i] += v`.
-- Do not cast traced values with `int()` or `float()`; use
-  `y_t.astype(jnp.int32)` for indexing.
-- Do not branch in Python on a value that depends on the data; use
-  `jnp.where`.
-- Keep them deterministic. A random draw inside `evolution` is sampled once and
-  frozen into the compiled model, which is rejected at validation.
-- Fields in `u` must be numeric or boolean. Encode a condition as `0`/`1`, not
-  as `"A"`/`"B"`.
+## 3. Specify priors and parameter coordinates
 
-Violations are caught before fitting, with a message naming the cause.
+`GaussianPrior(mean, covariance)` accepts scalar variance, a diagonal variance
+vector, or a full covariance matrix. **These are variances, not SDs.** A zero
+marginal variance fixes that parameter at its mean; its cross-covariances must
+also be zero. Fixed coordinates leave the optimization and evidence dimension.
 
-### Transforming parameters
+The fitted order is `[theta, phi, log_process_sd, log_observation_sd]`.
+Inspect `model.parameter_layout.names` rather than assuming positions.
+The prior factorizes across these four blocks. Scientific priors may have
+full covariance within the evolution or observation block; cross-block prior
+correlations are not represented. The posterior Hessian can nevertheless
+produce cross-block posterior correlations.
 
-Parameters are estimated on an unbounded scale with Gaussian priors, so
-constrained quantities are transformed inside the model function: a learning
-rate as `jax.nn.sigmoid(theta[0])`, a positive scale as `jnp.exp(phi[0])`. Name
-the raw parameter for what it is (`alpha_raw`, `log_beta`) so output stays
-readable.
+Constraints are usually expressed inside the model: `sigmoid(raw)` for a rate
+in `(0,1)`, or `exp(raw)` for a positive quantity. A Gaussian prior on `raw`
+induces a transformed prior on the scientific quantity. It is not a Gaussian
+or uniform prior on that quantity. No extra Jacobian is needed when the prior
+is defined directly on the fitted raw coordinate. A prior specified in a
+different coordinate must be transformed with its Jacobian, as for Gamma noise.
+MAP and the finite-order Laplace approximation depend on parameterization;
+exact Bayesian probabilities transform consistently.
 
-## Models with no latent dynamics
+## 4. Specify state and observation noise
 
-Not every model has a state that evolves. When the outcome on each trial
-depends only on that trial's inputs – a psychometric function, a regression on
-stimulus features – omit the evolution function and the evolution prior:
+| Argument | Supported specification | Default |
+|---|---|---|
+| `initial_state_covariance` | Fixed scalar, diagonal vector or full matrix | Zero |
+| `process_covariance` | Fixed covariance, callable `(theta, u_t)`, or `"diagonal"` with `process_noise_prior` | Zero |
+| `observation_covariance` | Gaussian only: fixed covariance, callable `(phi, u_t)`, or estimated diagonal noise | Estimate noise |
 
-```python
-model = StateModel(
-    observation=lambda x, phi, u_t: phi[0] + phi[1] * u_t,
-    family="gaussian",
-    priors=Priors(observation=GaussianPrior([0.0, 0.0], [1.0, 1.0], names=["b0", "b1"])),
-)
-```
+State covariances may be positive semidefinite; Gaussian observation covariance
+must be positive definite. Scalars mean variance times identity. Initial-state
+covariance is not automatically estimated and does not accept a callable or
+`"diagonal"` mode. Estimated process noise requires an explicit Gaussian prior
+on log-SDs. The estimated forms are $Q=\operatorname{diag}(e^{2\rho_Q})$ and
+$R=\operatorname{diag}(e^{2\rho_R})$. A callable permits parameter/input-dependent
+covariance, but must remain valid over the parameter region being evaluated.
+Binary/categorical outcomes do not use an additional observation covariance.
 
-$\theta$ is then an empty vector and only the observation parameters are
-estimated. `initial_state` may be omitted too: it defaults to `[0.0]`, and
-with no evolution the state never changes, so an observation function that
-ignores $x$ gives the same fit whatever it holds. Independent deterministic
-trials are evaluated with `jax.vmap`, and the constant state is broadcast for
-reporting. Set it when the observation function reads $x$. A stochastic state
-still requires filtering even when no evolution function is supplied.
+### Automatic Gaussian observation noise
 
-Declaring an evolution prior without an evolution function is an error, since
-that would announce parameters nothing can use.
+Omitting observation covariance estimates noise under independent precisions
 
-## Static and dynamic models
+$$\lambda_j=\sigma_j^{-2}\sim\operatorname{Gamma}(a_j,b_j),\qquad a_j=b_j=1,$$
 
-A model is **static** — better, deterministic — when the latent state follows
-its update rule exactly, with no noise. Given $\theta$ and the data, the whole
-trajectory is determined. This is the common case: standard learning models are
-deterministic in this sense, even though behaviour is stochastic.
-
-A model is **dynamic**, or stochastic, when the state itself is uncertain:
-
-$$x_{t+1} = f(x_t, \theta, u_t, y_t) + \eta_t, \qquad \eta_t \sim \mathcal{N}(0, Q_t)$$
-
-You get this by setting `process_covariance` (the $Q_t$ above, with dimension
-equal to the number of latent states) or `initial_state_covariance`, or both.
-Either can be a scalar, a diagonal vector, a full matrix, a callable, or the
-string `"diagonal"` to estimate the noise as a parameter.
-
-For Gaussian outcomes there is a second noise term,
-
-$$y_t = g(x_t, \phi, u_t) + \varepsilon_t, \qquad \varepsilon_t \sim \mathcal{N}(0, R_t)$$
-
-set through `observation_covariance`. Bernoulli and categorical outcomes take
-no extra $R_t$: their noise is already in the outcome distribution, and passing
-`observation_covariance` for them is an error.
-
-**Gaussian observation noise is estimated by default.** A Gaussian model has no
-likelihood at all without $R_t$ — the predictor $g$ is a point, and a point
-assigns zero density to a continuous outcome. So omitting `observation_covariance`
-does not mean "no observation noise"; it means *estimate it*. The toolbox then
-appends `log_observation_sd` to the parameter vector and infers
-$R = \mathrm{diag}(e^{2\rho})$ from the data, under a default prior on $\rho$.
-The default is **exactly** the proper Gamma prior on precision used by VBA:
-
-$$\lambda_j=\sigma_j^{-2}\sim\operatorname{Gamma}(a=1,b=1),$$
-
-where $b$ is the **rate**, not the scale. It is fixed before fitting; no
-subject-specific outcome scale is read to construct it. No observation-noise
-prior or covariance input is required from the user.
-
-Inference still uses $\rho_j=\log\sigma_j$ in the joint MAP/Laplace vector.
-The change of variables is part of the prior density:
+with **shape and rate**. The fitted coordinate is $\rho_j=\log\sigma_j$, whose
+normalized log density includes the change-of-variables Jacobian:
 
 $$\log p(\rho_j)=a_j\log b_j-\log\Gamma(a_j)+\log2
 -2a_j\rho_j-b_j e^{-2\rho_j}.$$
 
-The Jacobian $|d\lambda/d\rho|=2e^{-2\rho}$ and all normalizing constants
-are included once in the prior. Automatic differentiation of the complete
-log joint supplies optimization gradients and the observed Hessian. For this
-prior the negative log-prior curvature is $4b_j e^{-2\rho_j}$, rather than
-the inverse of its global variance.
-
-Prior log-SD moments are $E[\rho]=(\log b-\psi(a))/2$ and
-$\operatorname{Var}(\rho)=\psi_1(a)/4$. At $a=b=1$, these are approximately
-0.2886 and 0.4112. They are summaries and optimizer-proposal moments, not a
-Gaussian approximation to the evaluated prior. The exact central 95% SD
-interval is approximately $[0.52,6.29]$. At shape one the prior mean of
-$\sigma^2$ is infinite; summarize prior noise with quantiles rather than a
-mean variance. Prior-predictive simulations sample
-Gamma precision directly. Posterior-predictive simulations still sample the
-joint Gaussian Laplace posterior.
+Its negative log-prior curvature is $4b_j e^{-2\rho_j}$. Its moments are
+$E[\rho_j]=(\log b_j-\psi(a_j))/2$ and
+$\operatorname{Var}(\rho_j)=\psi_1(a_j)/4$. These moments scale optimizer
+proposals; they do not replace the exact density with a Gaussian.
+At $a=b=1$, they are about 0.2886 and 0.4112. The central 95% SD interval is
+about `[0.52, 6.29]`; mean variance is infinite. Use quantiles to describe this prior.
 
 ```python
 from gbmtoolbox import GammaPrecisionPrior
-
-StateModel(..., family="gaussian")  # estimate R under exact Gamma(1,1)
-StateModel(..., family="gaussian", observation_covariance=0.25)  # fixed variance
-StateModel(..., family="gaussian",
-           observation_noise_prior=GammaPrecisionPrior(shape=2, rate=0.5))
-StateModel(..., family="gaussian",
-           observation_noise_prior=GaussianPrior([np.log(0.5)], [0.5]))
+# Add one of these options to StateModel(...):
+# observation_covariance=0.25                         # known variance
+# observation_noise_prior=GammaPrecisionPrior(2, 0.5)  # shape, rate
+# observation_noise_prior=GaussianPrior([0.0], [1.0])  # Gaussian on log-SD
 ```
 
-For multivariate Gaussian outcomes, set `observation_dim` (or supply a matching
-vector prior) to estimate one independent precision per observed dimension.
-A scalar prior broadcasts independently. Cross-output correlations and
-trial-varying noise are not inferred by this diagonal default. VBA assigns
-precision hyperparameters by Gaussian source; one source containing several
-outputs need not match GBM's independent precisions.
+For `D` outputs, set `observation_dim=D` or supply a matching vector noise
+prior. A scalar prior is broadcast independently when the dimension is supplied.
+The default estimates one precision per output, not their correlations or
+trialwise changes. Matching VBA's Gamma(1,1) prior does not match its variational
+algorithm or source-grouping of precisions.
 
-### Noise summaries, scale, and evidence
+`fit.output.observation_noise_sd` reports $e^{\hat\rho}$: the exponentiated
+joint log-SD MAP, not the posterior mean or the SD-coordinate mode.
+`fit.input.observation_noise_prior` records the actual resolved prior; its
+mean/covariance alone cannot identify a non-Gaussian prior.
 
-`fit.output.observation_noise_sd` is $\exp(\widehat\rho)$, the exponentiated
-joint log-SD MAP. It is neither the posterior mean nor the SD-coordinate
-posterior mode. MAP depends on coordinate. VBA's commonly reported
-$\sqrt{b_{\mathrm{post}}/a_{\mathrm{post}}}$ is
-$1/\sqrt{E[\lambda\mid y]}$, not $E[\sigma\mid y]$.
+### Units and empirical priors
 
-The matching Gamma prior does not reproduce VBA's inference algorithm. GBM
-uses joint MAP and observed-Hessian Laplace inference; VBA uses variational
-updates and free energy. Differences can remain for fitted scientific
-parameters, uncertainty, and log evidence. Stochastic GBM models additionally
-use their existing filtering approximation; the conjugate reference below
-applies only when predictions are fixed and the state is deterministic.
+Gamma(1,1) is proper and fixed before data, but **not scale invariant**.
+For $y'=cy$, $c\ne0$, consistently transform predictions, scientific priors and
+noise rate $b'=c^2b$. Evidence then shifts by $-N\log|c|$ for $N$ scalar
+observations, cancelling in Bayes factors on the same data. Resetting the rate
+to 1 after changing units changes the prior model.
 
-For fixed scalar predictions, with $S=\sum_t(y_t-\mu_t)^2$,
+`observation_noise_prior_from_scale(y, prior_sample_size=nu0)` uses a robust
+outcome scale $s_0$ to set $a=\nu_0/2$, $b=\nu_0s_0^2/2$.
+Using the fitted outcomes to select it is empirical Bayes. Supplying
+`prior_scale` from independent information avoids that data reuse. Constant
+outcomes require an explicit scale. Do not tune priors to each model's residuals
+and interpret the resulting evidence as comparison under a common measurement prior.
 
-$$A=a+T/2,\quad B=b+S/2,\quad
-\widehat\rho=\tfrac12\log(B/A),\quad H_{\rho\rho}=4A.$$
+Changing the default noise prior affects Gaussian fits, evidence and downstream
+comparisons. Discrete likelihoods and Gaussian models with explicit unchanged
+noise specifications do not acquire this prior. Refit all candidates when
+changing the prior; do not mix evidences from different defaults.
 
-The precision posterior is Gamma($A,B$). Its integral gives the exact evidence
-reference
+## 5. Understand MAP, uncertainty and evidence
+
+GBM maximizes the normalized log joint over free coordinates:
+
+$$\hat w=\arg\max_w\{\log p(y\mid w)+\log p(w)\}.$$
+
+Multi-start L-BFGS-B uses four starts by default. Converged finite starts are
+preferred, then the largest log joint among them. This is not proof of a global
+optimum. The final observed Hessian is recomputed by automatic differentiation
+(or `hessian_method="central_fd"`), independently of L-BFGS-B's approximation:
+
+$$H=-\nabla_w^2\log p(y,w)\big|_{\hat w},\qquad
+q(w)=\mathcal N(\hat w,H^{-1}),$$
+
+$$\log Z_{\rm Laplace}=\log p(y\mid\hat w)+\log p(\hat w)
++\frac d2\log(2\pi)-\frac12\log\det H.$$
+
+Here $d$ counts free coordinates, including estimated noise. Posterior SDs are
+square roots of covariance diagonals; normal intervals assume a locally
+Gaussian, single-mode posterior. The complete evidence expression balances
+fit and prior/posterior concentration; the determinant term alone is not a
+coordinate-independent complexity measure. Other posterior modes are not summed.
+
+`laplace_valid` requires optimizer convergence and a positive-definite observed
+Hessian. Otherwise covariance is `None` and evidence is `NaN`; MAP predictions
+remain available. Hessian eigenvalues are not clipped. Ill conditioning or a
+boundary optimum can set `laplace_fragile`. These flags do not certify model
+adequacy, inner-filter convergence or approximation accuracy.
+
+### Hard bounds
+
+`Config(hard_bounds=...)` specifies one `(low, high)` pair or `None` per resolved
+parameter; either endpoint may be `None`. These restrict the search. GBM does
+not renormalize a truncated prior or compute a boundary-aware evidence integral.
+If bounds represent scientific support, the returned evidence is not generally
+the evidence of that normalized bounded model. A boundary mode also need not be
+stationary for the unconstrained log joint. Use appropriate transformed priors
+or a method that integrates the intended constrained distribution.
+
+### Exact reference for Gamma noise
+
+For fixed scalar predictions and deterministic states, let
+$S=\sum_t(y_t-\mu_t)^2$, $A=a+T/2$, $B=b+S/2$. Then
+
+$$\lambda\mid y\sim\operatorname{Gamma}(A,B),\quad
+\hat\rho=\tfrac12\log(B/A),\quad H_{\rho\rho}=4A,$$
 
 $$\log Z=-\tfrac T2\log(2\pi)+a\log b-\log\Gamma(a)
 +\log\Gamma(A)-A\log B.$$
 
-The toolbox continues to report **Laplace evidence**, even in this reference
-case; it does not substitute the analytic integral. In this one-dimensional
-case, its log-evidence error at the exact mode is
+GBM still uses Laplace evidence, with known error
 
-$$\log Z_{\mathrm{Laplace}}-\log Z
+$$\log Z_{\rm Laplace}-\log Z
 =(A-\tfrac12)\log A-A+\tfrac12\log(2\pi)-\log\Gamma(A).$$
 
-The error approaches zero with more observations. Numerical optimizer error
-adds a small residual. The Gamma prior is proper even at zero residual energy
-because $b>0$; no additional noise floor is introduced.
+This reference isolates the noise integral; it does not make evidence exact
+when predictions or latent states are also uncertain.
 
-**Automatic does not mean scale invariant.** The default Gamma(1,1) fixes a
-reference scale in outcome units. It is not the improper Jeffreys prior.
-Under $y'=cy$, preserve the same model by transforming predictions, affected
-scientific parameter priors, and the Gamma rate: $b'=c^2b$. Exact log evidence
-then shifts by $-N\log|c|$, with $N$ scalar observations, a common shift that
-cancels in Bayes factors on the same data. Laplace evidence follows this rule
-for a consistently transformed parameterization, up to numerical error.
-Keeping Gamma(1,1) after changing units specifies different prior beliefs.
+## 6. Understand filtering
 
-`observation_noise_prior_from_scale(y, prior_sample_size=nu0)` returns the
-same exact form, $\lambda\sim\operatorname{Gamma}(\nu_0/2,\ \nu_0 s_0^2/2)$,
-so that $E[\lambda]=1/s_0^2$; `prior_scale=1` with $\nu_0=2$ is the default
-prior. Passing observed `y` uses its MAD (with an SD fallback) to choose
-$s_0$ and therefore gives empirical-Bayes evidence conditional on that scale;
-an outcome with no scale information (constant, or one trial) raises and asks
-for `prior_scale`. It is not used by the
-automatic default. Do not derive noise-prior scales from model-specific fitted
-residuals for model comparison.
+Filtering is part of likelihood evaluation whenever initial-state or process
+covariance is nonzero, regardless of the requested uncertainty display:
 
-### Compatibility and model-comparison impact
+$$p(y_t\mid y_{<t},w)=\int p(y_t\mid x_t,w)\,p(x_t\mid y_{<t},w)\,dx_t.$$
 
-| Model or operation | Effect of the exact default |
+The filter maintains a Gaussian approximation to the predicted state,
+$\mathcal N(m_t,P_t)$. The fitted log likelihood sums its approximate predictive
+log likelihoods. Outer Laplace evidence inherits any inner filtering error;
+state marginalization is not a universal extra penalty.
+
+### Gaussian outcomes: extended Kalman filter
+
+With $J_t=\partial g/\partial x$ evaluated at $m_t$,
+
+$$S_t=J_tP_tJ_t^\top+R_t,\quad K_t=P_tJ_t^\top S_t^{-1},$$
+$$m_t^+=m_t+K_t[y_t-g(m_t)],\quad
+P_t^+=(I-K_tJ_t)P_t(I-K_tJ_t)^\top+K_tR_tK_t^\top.$$
+
+The predictive log likelihood is $\log\mathcal N(y_t;g(m_t),S_t)$.
+For transition Jacobian $F_t$ evaluated at $m_t^+$,
+
+$$m_{t+1}=f(m_t^+,\theta,u_t,y_t),\qquad
+P_{t+1}=F_tP_t^+F_t^\top+Q_t.$$
+
+These are exact for linear-Gaussian models at default `filter_damping=1`, up
+to floating-point error. Nonlinear evolution or observation gives an EKF
+approximation; Gaussian observations alone do not imply exact integration.
+Damping below 1 scales the gain in both mean and Joseph covariance updates;
+this is not the ordinary EKF. The current Gaussian branch does not use
+`filter_jitter`.
+
+### Discrete outcomes: Fisher-scoring state update
+
+Write $x=m+Ps$ to preserve a possibly singular state support. At the current
+$x$, let $\ell(x)=\log p(y_t\mid x,w)$, $v=\nabla_x\ell(x)$ and
+$C=J^\top WJ$, where $J$ differentiates the logits and $W$ is their Fisher
+information: $p(1-p)$ for Bernoulli or $\operatorname{diag}(p)-pp^\top$ for
+categorical observations. With damping $d_f$ and jitter $\epsilon$, the code uses
+
+$$s\leftarrow s+d_f[(1+\epsilon)I+CP]^{-1}(v-s).$$
+
+After at most `filter_max_iter` iterations, the approximate covariance and
+predictive log likelihood are
+
+$$P^+=\operatorname{sym}\{[(1+\epsilon)I+PC]^{-1}P\},$$
+$$\log\widetilde p(y_t)=\ell(m+Ps)-\tfrac12s^\top Ps
+-\tfrac12\log\det[(1+\epsilon)I+PC].$$
+
+At convergence and zero jitter, this is the usual local Laplace calculation
+when the logits are affine in the state. For nonlinear logits, Fisher curvature
+omits second derivatives of the observation map and is generally not the exact
+observed state-posterior Hessian. Finite iterations add another approximation;
+there is no guarantee the update reaches the mode. These approximate masses
+are not guaranteed to normalize exactly over all possible outcomes.
+
+`filter_jitter` regularizes discrete solves; it does not add variance to null
+state directions. Avoiding covariance eigenvectors makes derivatives well
+behaved at repeated eigenvalues, but changing covariance rank remains delicate.
+
+### When to use filtering and what to inspect
+
+Use filtering when state/process uncertainty is part of the scientific model.
+Local Gaussian approximations are most plausible when distributions remain
+concentrated and approximately unimodal. Strong nonlinearities, broad or
+multimodal states, and weakly observed dynamics need independent checks such
+as numerical integration or simulation-based reference inference.
+
+Inspect the inner update separately:
+
+```python
+run = fit.model.evaluate(fit.output.parameters[0], fit.data[0], config=fit.profile.config)
+print(run.get("update_converged"))
+print(run.get("update_iterations"))
+```
+
+The optimizer currently uses the computed likelihood even if an inner discrete
+update has not converged. Increasing `filter_max_iter` and checking stability
+can expose truncation error; outer `laplace_valid=True` does not rule it out.
+For discrete stochastic models, `prediction` is sigmoid/softmax at $m_t$,
+not the probability integrated over the state distribution. It need not equal
+the exponentiated approximate observed-outcome log likelihood above.
+
+## 7. Read latent uncertainty and predictive simulations
+
+| `Config(latent_uncertainty=...)` | What is reported |
 |---|---|
-| Deterministic Gaussian, omitted noise prior/covariance | MAP, covariance, noise estimates, and log evidence can change |
-| Stochastic Gaussian, omitted noise prior/covariance | Same prior change; filtering equations are unchanged but fitted parameters and filtered predictions can change |
-| Gaussian with explicit Gaussian log-SD prior | Same fitting objective, Hessian, and evidence as before |
-| Gaussian with fixed or callable covariance | No new precision parameter or prior; fitting objective unchanged |
-| Bernoulli or categorical | No observation-precision prior is added; fitting objective and filtering unchanged |
-| BMS with the same evidence matrix | Algorithm and results unchanged |
-| BMS supplied newly fitted Gaussian evidence | Responsibilities, frequencies, and protected exceedance probabilities can change |
-| HBI | Group updates unchanged; exact noise prior preserved, but changed Gaussian subject fits/evidence can change group results |
-| Prior predictive | Exact Gamma draws for the new default; explicit Gaussian and discrete prior draws retain their existing seeded behavior |
-| Information diagnostic | Subtracts actual prior curvature at the MAP, then whitens using global prior moments |
-
-Do not mix historical and new default Gaussian evidence values. Refit all
-candidate models for a consistent comparison. This is a Bayesian change of
-prior, not an empirical-Bayes change or an extra model-selection penalty.
-Evidence comparisons require models for the same observed data and observation
-measure; Gaussian densities and binary/categorical masses for differently
-encoded outcomes are not directly comparable.
-
-The earlier Gaussian approximation can still be stated explicitly as a
-`GaussianPrior` on log SD with the moments above, mean
-$(\log b-\psi(a))/2$ and variance $\psi_1(a)/4$.
-
-`fit.input.observation_noise_prior` records the resolved distribution and its
-parameters. `prior_mean` and `prior_covariance` remain moments in the fitted
-coordinates and do not alone specify a non-Gaussian density.
-
-The distinction matters because it changes the likelihood, not just the
-reporting. If the state is uncertain, it must be integrated out (below). If it
-is deterministic, there is nothing to integrate.
-
-## Estimation
-
-### Priors and the posterior
-
-Evolution/observation parameters get Gaussian priors; estimated
-observation noise uses the exact default above unless overridden. Setting a prior variance to zero
-**fixes** that parameter at its prior mean: it is removed from the optimisation
-and reported with zero posterior variance. This is how you compare a model
-against a restricted version of itself.
-
-The toolbox estimates the **maximum a posteriori** value — the parameter vector
-maximising the posterior density:
-
-$$\hat{p} = \arg\max_{p}\ \log p(y \mid p) + \log p(p)$$
-
-Search is multi-start L-BFGS-B, from several starting points, keeping the best
-optimum found. The default is four starts (`Config(num_init=...)`).
-`Config(hard_bounds=...)` takes one `(low, high)` pair or `None` per resolved
-parameter, in `model.parameter_layout.names` order, including any estimated
-noise log-SDs; either side of a pair may be `None`.
-
-### Fitting performance and optimizer coordinates
-
-Deterministic observation-only models use `jax.vmap`; models with explicit
-evolution retain `jax.lax.scan`. Every outcome still contributes its normalized
-likelihood. Scalar and diagonal Gaussian covariances use elementwise arithmetic,
-while full or callable covariance specifications retain the general matrix
-likelihood. No filtering approximation, prior density, or evidence formula is
-changed by these execution paths.
-
-Parameter scaling is disabled by default; enable it with
-`Config(parameter_scaling=True)`. In free parameter space the
-optimizer works with $x=\mu+Bz$. Without hard bounds, $B$ is the Cholesky factor
-of the free prior covariance. With bounds, $B$ is diagonal with the marginal
-prior standard deviations, so each original box constraint maps to a box
-constraint in $z$. Fixed parameters are removed before scaling. For exact Gamma
-noise, prior log-SD moments define only the numerical scale; the objective still
-uses the normalized exact Gamma density and its transformation Jacobian.
-
-The objective is the original log joint evaluated at $x=\mu+Bz$. No coordinate
-Jacobian is added to the optimization target: this is a change of search
-variables, not a different definition of the MAP. If $H_z$ is the observed
-Hessian in optimizer coordinates, the returned Hessian is
-$H_x=B^{-T}H_zB^{-1}$. Evidence uses $H_x$ and the original normalized log prior.
-The finite-difference backend continues to calculate curvature in original
-coordinates. Returned gradients, search paths, starts, covariance, and fitted
-parameters also use original coordinates.
-
-Scaling changes numerical search paths and the effective stopping criterion.
-Nonlinear models can reach a different local optimum. Inspect convergence and
-retain multiple starts where needed. With the default
-`parameter_scaling=False` the optimizer searches the original free parameters.
-
-Objective and full-evaluation caches use immutable execution settings,
-callable identities, parameter block dimensions, and applicable free indices
-rather than model identity. Numerical Gaussian and Gamma prior quantities are
-dynamic arguments, so HBI and prior-sensitivity refits can reuse compilation.
-Changing shapes/dtypes or input dictionary structure can trigger recompilation;
-recreating an observation/evolution callable also creates a different cache
-entry. Subclasses conservatively use model identity. Callables and captured
-settings must remain immutable; construct a new callable/model when those
-settings change. Cache entries hold strong references and persist for the
-Python process, so reusing model functions limits cache growth.
-
-`Config(n_jobs=n)` fits subjects in `n` worker processes (`-1`: one per CPU;
-the default `1` fits them sequentially in the calling process). Subjects are
-dealt round-robin to one task per worker, so each worker receives the model
-once, compiles its likelihood once, and fits its subjects one after another.
-Workers are fresh processes started by joblib's `loky` backend, because
-forking a process in which JAX has started threads is unsafe, and models are
-sent with cloudpickle, so lambdas and functions defined in a script or notebook
-work. Each subject keeps its own seed stream, so parameters, evidence,
-diagnostics and propagated latent draws are bitwise identical to the
-sequential fit. The calling process still validates the specification first,
-so modelling errors surface before any worker starts. Warnings raised inside
-workers are printed by the workers; progress lines are printed afterwards in
-subject order. Parallel fitting helps when a subject takes seconds rather than
-milliseconds; for fast models, worker start-up and per-worker compilation
-dominate. The model's callables and any data they capture must be picklable
-by cloudpickle.
-
-Data are prepared once per subject. Preflight compiles and checks the same
-value-and-gradient executable used by the optimizer, retaining the first
-evaluation. It checks the clipped initial point when hard bounds are supplied.
-Final reporting uses a cached full evaluator; propagated state uncertainty
-uses the same structural caching and prepared data.
-
-Timing fields, in seconds:
-
-| Location | Keys and interpretation |
-| --- | --- |
-| `fit.profile.timings` | `validation` includes host checks/data preparation; `preflight` includes first objective/gradient compilation and evaluation; `total` includes the whole fit and optional plotting. |
-| `fit.math.diagnostics[s].timings` | `first_objective`, `optimization`, `map_components`, `hessian`, `prediction`, `latent_uncertainty`, `optimize_total`, `subject_total`. First-use compilation is included in the relevant stage. |
-| `fit.math.diagnostics[s].n_evaluations` | Sum of SciPy objective requests across starts; cached requests are still counted by SciPy. |
-| `fit.math.diagnostics[s].starts[k]` | `n_evaluations` and `elapsed_seconds` for one start; `gradient_norm` uses original coordinates. |
-
-Stages containing JAX execution synchronize their results before recording
-elapsed time. Totals contain their component stages and should not be added to
-them. Subject totals exclude the shared preflight stage; the first subject's
-`first_objective` is small because preflight retained that result.
-
-```python
-fit = individual_fit(data, model, config=Config(num_init=1, verbose=False))
-print(fit.profile.timings)
-print(fit.math.diagnostics[0].timings)
-print(fit.math.diagnostics[0].n_evaluations)
-```
-
-Impact on discrete models and comparison: deterministic Bernoulli/categorical
-observation-only models share the vectorized path; their logit definitions and
-likelihood normalizations are unchanged. Dynamic and filtered discrete models
-retain sequential inference. BMS uses the same original-coordinate Laplace
-evidence. HBI can reuse compilation as group priors change, while its statistical
-updates remain unchanged. Scaled searches may change which mode is selected;
-this numerical effect can affect evidence and should be checked in nonlinear
-models. Full posterior curvature is still recomputed at the selected MAP.
-
-Three existing Gamma-prior inconsistencies were also corrected: the documented
-`fit.input.observation_noise_prior` metadata is now recorded; prior-predictive
-draws use exact Gamma precisions; and `prior_preconditioned_information` subtracts
-the exact local Gamma prior curvature ($4b\exp(-2\rho)$), rather than the Gaussian
-moment-proxy precision. These change prior-predictive simulations and the
-information diagnostic for Gamma noise, but not the fitting density or evidence.
-Gaussian-prior predictive sampling and discrete-model densities are unchanged.
-
-### Uncertainty: the Laplace approximation
-
-Around the MAP, the posterior is approximated by the Gaussian that matches its
-curvature. Writing $H$ for the observed Hessian of the negative log posterior at
-$\hat p$:
-
-$$p(p \mid y) \\approx\ \mathcal{N}\\left(\hat{p},\ H^{-1}\right)$$
-
-Parameter standard errors are the square roots of the diagonal of $H^{-1}$.
-
-Two deliberate choices here. First, **the optimiser's own curvature estimate is
-never reused**: L-BFGS-B maintains a quasi-Newton approximation for its own
-purposes, and it is not accurate enough for inference. The Hessian is
-recomputed from scratch at the final MAP, by automatic differentiation
-(`hessian_method="autodiff"`, the default) or central finite differences
-(`"central_fd"`). The two agree to finite-difference truncation error.
-
-`map_converged` reports convergence of the selected L-BFGS-B run;
-`hess_positive_definite` assesses the independently computed observed Hessian.
-`laplace_valid` requires both. If either fails, posterior covariance is `None`
-and log evidence is `NaN`. MAP/predictions and diagnostics are retained for
-inspection. Converged starts are preferred over unconverged starts; among them,
-the largest finite log joint wins. Optimizer success is a numerical criterion,
-not a guarantee of a global optimum. Hard-bound solutions remain flagged
-`laplace_fragile` because an unconstrained Gaussian may be inappropriate.
-
-Second, **the Hessian is never repaired.** If it is not positive definite, the
-Laplace approximation is invalid and is reported as invalid. No eigenvalue
-clipping, no nudging toward positive definiteness. A valid MAP and a valid
-Laplace approximation are separate outcomes, and a model can legitimately have
-the first without the second — which is information about your model, not a
-technicality to be smoothed over.
-
-### Model evidence
-
-The same Hessian gives the Laplace approximation to the log marginal
-likelihood:
-
-$$\log p(y) \\approx\ \log p(y \mid \hat{p}) + \log p(\hat{p}) + \frac{d}{2}\log 2\pi - \frac{1}{2}\log\det H$$
-
-for $d$ free parameters. The final term penalises models whose fit depends on
-finely tuned parameters, which is how the evidence embodies a complexity
-penalty without an arbitrary term. This feeds model comparison.
-
-For a stochastic model the first term $\log p(y\mid\hat p)$ is the filtering likelihood, in which the state has already been integrated out (see Filtering). This contributes a second, per-trial complexity penalty in addition to $-\tfrac12\log\det H$. Evidences remain comparable across models, but for Bernoulli and categorical outcomes the inner integral is itself a Laplace approximation, so the evidence inherits that approximation error.
-
-## Filtering: when the state is uncertain
-
-If the state is stochastic, the likelihood of a trial is not conditional on a
-single state value. The state must be integrated out:
-
-$$p(y_t \mid y_{1:t-1}, \theta, \phi) = \int p(y_t \mid x_t, \phi)\ p(x_t \mid y_{1:t-1}, \theta, \phi)\ dx_t$$
-
-This is the filtering likelihood, and it is evaluated at *every* parameter
-vector the optimiser tries — it is part of estimation, not a post-hoc summary.
-How the integral is handled depends on the outcome family:
-
-**Gaussian outcomes** use an extended Kalman update. When the model is actually
-linear, this is the exact Kalman filter, and the implementation reproduces the
-exact recursion to machine precision with `filter_damping=1` (the default).
-The observation Jacobian, innovation covariance, gain, predictive likelihood,
-and filtered covariance now all use the same predicted-state linearization.
-The covariance uses the Joseph form. Nonlinear Gaussian results can therefore
-change relative to the former hybrid update that recomputed curvature at the
-updated state. Smaller damping deliberately underweights the mean update and
-uses the same damped gain in the Joseph covariance; it is not the ordinary EKF.
-Gaussian updates do not require eigenvectors of the state covariance.
-
-**Bernoulli and categorical outcomes** have no closed form. The toolbox uses a
-local Laplace-Gaussian update with Fisher scoring: it approximates the
-posterior over the state by the Gaussian matching its mode and curvature. This
-is genuinely **approximate** Bayesian filtering and is labelled as such
-throughout. Discrete updates use $x=m+Ps$ and linear solves involving
-$I+PH$; they avoid differentiating covariance eigenvectors, preserve a fixed
-semidefinite state support, and remain differentiable at repeated eigenvalues.
-Changing support/rank remains a nonsmooth scientific problem. `filter_jitter`
-regularizes these solves; it does not add stochastic variance to null directions.
-The Fisher curvature differs from the exact observed state Hessian for nonlinear
-observation maps. Measured against dense quadrature, the one-step predictive
-probability is accurate to about `1.2e-3` (Bernoulli) and `4.1e-3`
-(categorical) in the documented reference cases. See
-[VALIDATION.md](VALIDATION.md).
-
-## Reporting latent uncertainty
-
-`Config(latent_uncertainty=...)` controls what is retained after fitting. It
-does **not** make a deterministic model stochastic; if the model has state
-noise, filtering happens during estimation regardless of this setting.
-
-`"none"` keeps the state trajectory only.
-
-`"propagated"` answers: *given that I am uncertain about the parameters, how
-uncertain am I about the state trajectory?* Parameters are drawn from the
-Laplace posterior, the model is rerun for each draw, and the spread across runs
-is reported with trial-wise covariance and empirical credible intervals. The
-same algorithm serves every family.
-
-`"filtered"` answers a different question: *given the fitted parameters, how
-uncertain is the state itself?* This reports the filter's own covariance
-$P_t$. It requires a stochastic model — on a deterministic one the answer is
-identically zero, so the toolbox rejects the request rather than returning
-zeros labelled as uncertainty.
-
-The two are not interchangeable. Propagated uncertainty comes from not knowing
-the parameters; filtered uncertainty comes from the state being noisy.
-
-## Checking a fit
-
-Validation runs before optimisation: data shape and outcome support, trial
-input lengths, parameter and prior dimensions, name uniqueness, covariance
-validity, and a full likelihood-and-gradient evaluation at the prior mean.
-Problems surface as errors naming the cause, rather than as a failed fit.
-
-After fitting:
-
-```python
-from gbmtoolbox import (
-    convergence_diagnostics,  # did multi-start agree?
-    posterior_hessian_diagnostics,  # is the Laplace approximation sound?
-    prior_preconditioned_information,  # what did the data add over the prior?
-    numerical_local_identifiability,  # are parameters separately determined?
-)
-```
-
-`numerical_local_identifiability` is worth running routinely. If two parameters
-only ever appear in combination, it reports a rank deficiency and the direction
-that is not determined — a property of your model, visible before you
-over-interpret an estimate. It is a numerical check at the fitted point, not a
-proof of global identifiability.
-
-For Gaussian models, `observation_noise_correction` asks whether the reported
-observation SD can be trusted. That SD comes from the residuals at the fitted
-parameters, which treats them as known exactly, so a model with enough freedom
-relative to the number of trials leaves residuals that understate the noise --
-the familiar gap between $SSE/T$ and $SSE/(T-p)$. The diagnostic recomputes the
-noise from the expected residual energy under the Laplace posterior and reports
-an inflation factor; near 1 the reported SD is fine, at 1.1 or above it is not.
-It changes neither the fit nor its evidence. It applies to deterministic latent
-states: with initial-state or process noise the residuals at the predicted
-state also contain latent-state variance, so it returns `valid=False` there.
-The noise correction remains a residual-energy diagnostic: it does not
-re-estimate Gamma hyperparameters, replace the noise posterior, or change
-model evidence. Its inflation factor compares corrected and uncorrected
-residual scales, not the reported MAP SD.
-Also available: `prior_sensitivity`, to see how much conclusions depend on prior
-choices, and `prior_predictive` / `posterior_predictive`, to check that the
-model generates data resembling what was observed.
-
-## Comparing models
-
-Fit each candidate to every subject, then compare at the group level.
-
-```python
-from gbmtoolbox import bms, hbi_main
-```
-
-`bms` performs random-effects Bayesian model selection from a
-subjects-by-models matrix of log evidences. It treats the model identity as a
-random effect: rather than asking which model wins overall, it estimates the
-proportion of the population each model best describes, which is robust to a
-minority of subjects behaving differently.
-
-### Extended BMS
-
-The extended routine supports model families, paired conditions, factorial
-condition layouts, and independent groups. Model evidence is always provided
-with subjects as the first axis; indices are zero based.
-
-| Input | Main result | Inferential target |
-| --- | --- | --- |
-| `(subjects, models)` | `BMSResult` | Population model frequencies and EP/PXP |
-| Same matrix with `families` | `BMSResult.families` | Marginal family frequencies and EP/PXP |
-| `(subjects, models, conditions)` ndarray | `ConditionBMSResult` | Prevalence of equal versus unequal condition tuples |
-| List of group matrices | `GroupBMSResult` | Shared versus separate population frequency profiles |
-
-Explicit `bms_conditions` and `bms_groups` functions are also available. A list
-of 2D matrices denotes independent groups; convert paired-condition data to a
-3D ndarray instead. Group sample sizes may differ. Each group must have the same
-model definitions, model order, and comparable model priors. Paired conditions
-must have the same subjects in the same row order. The toolbox can validate
-dimensions and finiteness, but cannot verify subject identities or scientific
-comparability of the fitted models from an evidence array alone.
-
-#### Families and priors
-
-```python
-result = bms(L, families=[[0, 1], [2, 3]],
-             family_names=["learning", "no_learning"], random_state=42)
-print(result.families.model_frequency)
-print(result.families.protected_exceedance_prob)
-```
-
-Families must be non-empty, disjoint, and cover each candidate exactly once.
-Without families, the historical GBM prior is preserved: $\alpha_{0k}=1$.
-With $F$ families and family size $K_f$, the default is
-$\alpha_{0k}=1/(FK_f)$ for $k\in f$, so each family has prior mass $1/F$ and
-the total prior count is one. Explicit `alpha0` overrides this default.
-Prior count affects RFX inference and must be reported. VBA uses one prior
-count in total even without families; pass `alpha0=np.full(K, 1 / K)` to
-reproduce that.
-
-The default `family_method="marginal"` first integrates a uniformly selected
-within-family model separately for each subject:
-
-$$L_{s,f}=\operatorname{logsumexp}_{k\in f}(L_{s,k})-\log K_f.$$
-
-RFX inference then uses these family evidences and prior counts
-$\alpha_{0f}=\sum_{k\in f}\alpha_{0k}$. It estimates population **family**
-frequencies without estimating population frequencies of models inside each
-family. This matches the default family-level between-group comparison.
-Duplicating every model in a family leaves its marginal evidence unchanged.
-
-For **two families**, numerical quadrature integrates the frequency posterior:
-
-$$p(r\mid y)\propto r^{a-1}(1-r)^{b-1}
-\prod_s[r\exp(L_{s,0})+(1-r)\exp(L_{s,1})].$$
-
-This posterior is generally not Beta/Dirichlet. Means, variances, responsibilities,
-evidence, and EP are integrated directly. `families.posterior_parameters` is
-therefore `None`; `expected_counts` is the prior plus expected informative-label
-counts, **not** parameters of an exact posterior Dirichlet. `frequency_variance`
-reports the integrated variance, and `method="marginal_binary_quadrature"`
-identifies this calculation. For more than two families, the frequency posterior
-and evidence still use mean-field VB (`method="marginal"`).
-
-To retain the previous analysis use `family_method="aggregate"`. It sums the
-full model-level variational Dirichlet counts $a_f=\sum_{k\in f}a_k$ and
-responsibilities. This is exact aggregation of an **approximate** model posterior,
-not exact family inference. With weak evidence and small asymmetric model prior
-counts, mean-field updates can produce strongly biased family frequencies.
-The aggregate option retains this limitation; use it only with that assumption
-explicitly reported.
-
-The model null fixes model frequencies to $1/K$. The family null fixes total
-family mass to $1/F$ and model mass inside each family to $1/K_f$:
-
-$$F_{0,f}=\sum_s\log\left[\sum_f\sum_{k\in f}
-\frac{\exp(L_{sk})}{FK_f}\right].$$
-
-Family BOR is $\operatorname{sigmoid}(F_{0,f}-F_{1,f})$ under equal hypothesis
-prior odds. $F_{1,f}$ is the integrated two-family evidence or the larger-space
-variational bound; for aggregate mode it is the full-model bound. Family PXP is
-$(1-\mathrm{BOR}_f)\mathrm{EP}_f+\mathrm{BOR}_f/F$.
-The null additionally fixes within-family mixtures; it does not integrate an
-unknown population model profile within each family. Model BOR and family BOR
-remain separate. Use the family BOR to interpret family or condition PXP.
-
-Exactly constant evidence rows contribute an evidence offset but no information
-about frequencies. Their labels are marginalized before the VB updates; they do
-not increase posterior counts. `n_informative_subjects` records the remaining
-rows. This removes the spurious learning from entirely uninformative subjects,
-but **does not remove general mean-field bias for weak nonconstant evidence**.
-In particular model-only BMS (including two models) retains its historical VB
-reports; exact binary integration is used for marginal families and group odds.
-
-`result.families.within[f]` is a separate BMS analysis restricted to family $f$,
-with uniform prior counts totaling one. It is conditional on restricting the
-candidate space; it is not the same as the full-model posterior renormalized
-within a family. Set `within_families=False` to skip these extra fits.
-A singleton candidate/family has frequency and EP/PXP one; a structurally
-vacuous one-category BOR is reported as one.
-
-#### Paired and factorial conditions
-
-```python
-out = bms_conditions(L_conditions, families=[[0, 1], [2, 3]])
-print(out.xp, out.pxp)
-print(out.best[0].models)
-print(out.per_condition[0].families.model_frequency)
-```
-
-For $C$ conditions and $K$ models, enumerate $K^C$ model tuples
-$t=(m_1,\ldots,m_C)$ and compute
-$L_{s,t}=\sum_c L_{s,m_c,c}$. A tuple belongs to `equal` when all its models
-are identical, or all belong to the same supplied family. The remaining tuples
-belong to `not_equal`. These two tuple families have equal prior mass and total
-prior count one, regardless of their different sizes. `alpha0` specifies only
-the per-condition analyses; the between-condition hypothesis prior is fixed
-as stated above.
-
-`xp` is the EP that equal tuples are more frequent than unequal tuples;
-`pxp` protects it using the tuple-family BOR. Neither quantity is a posterior
-probability that every subject uses one common model, nor a group-frequency
-equality test. `best` identifies the tuple with highest posterior expected
-frequency, while `per_condition` retains each condition's standard BMS.
-The full arrays are `equal_exceedance_prob`, `equal_protected_exceedance_prob`,
-`bor`, `equal_mask`, and `between`. With one condition the function warns and
-returns standard BMS. With only one model family, equality is vacuous and its
-EP/PXP are one.
-
-Summing log evidences is justified when condition datasets are independent
-conditional on the tuple and their condition-specific parameters are separately
-integrated with independent priors. Fitting shared parameters across conditions
-requires a joint evidence calculation; separate evidences cannot simply be
-summed. Overlapping data must not be counted twice.
-
-A factorial layout contains each zero-based condition index once:
-
-```python
-out = bms_conditions(L_four_conditions, factors=np.array([[0, 1], [2, 3]]))
-print(out.equal_protected_exceedance_prob)  # one result for each axis
-```
-
-For each non-singleton axis, equality requires identical model/family labels
-along that axis at every fixed combination of the other factor levels. The
-original axes are recorded in `factor_axes`; `best[f]` and `between[f]` refer
-to the corresponding comparison. This follows VBA's factorial tuple logic.
-
-Enumeration is exponential. `max_tuples=100000` guards allocation and raises
-before constructing larger spaces. Increasing it is explicit opt-in; it does
-not make a large comparison computationally cheap. Above 10,000 tuples a warning
-is issued. Family aggregation saves EP sampling dimensions, but model-tuple
-posteriors and their model EPs still require the full tuple space.
-
-#### Independent groups
-
-```python
-out = bms_groups([L_patients, L_controls], families=[[0, 1], [2, 3]])
-print(out.probability_equal, out.probability_different)
-print(out.log_bayes_factor)  # positive favors different profiles
-```
-
-Following the statistical construction in `VBA_groupBMC_btwGroups`, compare
-$H_=$ (one population-frequency profile for all groups) with $H_{\ne}$
-(independent group-specific profiles). Let $F(L)$ denote the RFX log evidence (integrated for two comparison categories, a variational bound otherwise):
-
-$$F_= = F(\operatorname{stack}_g L_g),\qquad
-F_{\ne} = \sum_g F(L_g),\qquad
-\log BF_{\ne,=} = F_{\ne}-F_=.$$
-
-With prior equality probability $\pi_=$, the approximate hypothesis posterior is
-
-$$P(H_=\mid y)=\operatorname{sigmoid}
-\left[F_=-F_{\ne}+\log\frac{\pi_=}{1-\pi_=}\right].$$
-
-`prior_equal=0.5` is the default. The same Dirichlet prior is used under the
-pooled and each separate analysis. This generalizes VBA's two-group test to
-two or more independent groups. It compares entire frequency profiles, so
-groups can have the same winning model while supporting different profiles.
-There are no group model tuples and no group `xp` or `pxp`. For two comparison categories, Gauss-Jacobi quadrature integrates the frequency
-likelihood and `evidence_method="binary_quadrature"`. For larger spaces it is
-`"variational"`: errors in the two bounds may differ and need not cancel.
-Completely uninformative group data preserve `prior_equal` exactly.
-
-Without families, `group_level="auto"` compares model frequencies. With
-families it compares family frequencies, using per-subject family evidences
-
-$$L_{s,f}=\log\left[\frac{1}{K_f}\sum_{k\in f}\exp(L_{s,k})\right].$$
-
-The `-log(K_f)` normalization prevents large families receiving greater
-evidence solely because they contain more models. This specifies uniform model
-selection within a family for each subject; it does not learn a population
-distribution over within-family models. Family-level Dirichlet prior counts
-are sums of the specified/default model prior counts. Use
-`group_level="models"` to retain the full model-frequency comparison with
-family-balanced priors, as VBA's group function does when given families.
-This distinction can change results when groups differ only within a family.
-
-`pooled` and `per_group` retain full model/family reports.
-`comparison_pooled` and `comparison_per_group` retain variational comparison
-reports even when group odds use quadrature. The actual hypothesis evidences are
-`log_evidence_equal` and `log_evidence_different`; the separate
-`variational_log_evidence_*` fields retain the bounds for inspection. `group_sizes`, `group_names`,
-`comparison_level`, and `prior_equal` record the analysis choices. Irrelevant
-subject-specific evidence constants are removed internally when computing
-BOR and group Bayes factors, while reported evidence values retain the original
-constants.
-
-#### Exceedance sampling and differences from VBA
-
-Variational Dirichlet EPs for two candidates follow an analytic Beta tail; a single candidate has
-EP one. Larger spaces use seeded Dirichlet draws in blocks bounded to about
-two million entries. Expected frequencies are analytic. For sampled EPs the
-Monte Carlo standard error is at most $0.5/\sqrt{n_{samples}}$ per entry;
-the default 100,000 draws gives an upper bound about 0.0016. There is no
-full draws-by-model sample allocation for family aggregation.
+| `"none"` | State trajectory without uncertainty intervals |
+| `"propagated"` | Spread of trajectories/filtered means across static Laplace parameter draws |
+| `"filtered"` | Filtered state covariance conditional on the fitted static parameters |
+
+Propagated draws rerun the model with the **observed** outcomes. For stochastic
+models they rerun the filter and retain its state means; they do not draw state
+paths. They omit the conditional variance contribution in
+
+$$\operatorname{Var}(x_t\mid y)=
+E_w[\operatorname{Var}(x_t\mid y,w)]+\operatorname{Var}_w[E(x_t\mid y,w)].$$
+
+This identity explains the two sources of uncertainty. GBM propagates filtered
+means rather than smoothed means, so it does not compute the full-data second
+term exactly either. It is not a full smoothing posterior over states and parameters. Filtered
+output conditions on the MAP and uses observations up to that trial, not future
+observations. Neither option alone supplies total state uncertainty in a
+stochastic model. `"filtered"` is rejected for a deterministic state model.
+Deterministic trajectories are recorded before evolution; stochastic `states`
+are filtered means, while `predicted_state` gives their pre-observation values.
+
+`prior_predictive(model, template_data, ...)` samples parameter priors (including
+exact Gamma precision draws), state noise and outcomes. `posterior_predictive`
+samples the joint Gaussian Laplace parameter approximation and generates new
+state paths/outcomes. Generated outcomes feed subsequent evolution; trial
+inputs are copied from the template. If rewards or stimuli depend on simulated
+choices, supply a simulator for that task/environment rather than treating a
+recorded adaptive input sequence as a freely generated experiment.
+
+These simulations check model adequacy; they do not establish that parameters
+or competing models are identifiable. Posterior-predictive draws require valid
+Laplace covariance and do not incorporate uncertainty over learned group priors.
+
+## 8. Check a fit
+
+Start with `fit.math.diagnostics[subject]`. Inspect convergence across starts,
+posterior curvature, parameter plausibility, and predictive discrepancies.
+A finite evidence alone is insufficient.
+
+### Local prediction-sensitivity diagnostic
+
+The public function remains `numerical_local_identifiability(fit, subject=0)`.
+It computes the singular values and rank of the prediction Jacobian at the MAP,
+with one redundant categorical probability removed. A null direction leaves
+reported predictions unchanged to first order. This is neither a proof of global
+identifiability nor a test of the entire likelihood: a variance parameter can
+have zero mean-prediction sensitivity while being identifiable from dispersion.
+Use noise correlations and likelihood curvature alongside this diagnostic.
+
+### Likelihood curvature in prior units
+
+`prior_preconditioned_information` computes
+
+$$H_{\rm lik}=H-H_{\rm prior}(\hat w),\qquad
+M=\Sigma_0^{1/2}H_{\rm lik}\Sigma_0^{1/2}.$$
+
+For Gaussian priors, an eigenvalue above 1 means likelihood curvature exceeds
+prior curvature along the corresponding scaled direction. For Gamma noise,
+the code subtracts its actual local curvature but scales by global log-SD
+prior moments. Thus the same threshold is a variance-scaled descriptive index,
+not an exact comparison with local Gamma prior curvature. Negative values
+indicate negative observed likelihood curvature; they do not by themselves
+invalidate a positive-definite posterior Hessian.
+
+### Observation-noise correction: a residual-energy diagnostic
+
+`observation_noise_correction` asks: **how much does uncertainty in fitted
+predictions add to squared residuals?** It does not decide whether the fitted
+observation SD is correct. Let $r_t=y_t-g_t(\hat w)$, and linearize the prediction
+under $q(w)=\mathcal N(\hat w,\Sigma)$:
+
+$$E_q[(y_t-g_t(w))^2]\approx r_t^2+J_t\Sigma J_t^\top.$$
+
+The cross term vanishes because $E_q[w-\hat w]=0$. “Residual energy” means the
+sum of squared prediction errors, not a separate physical quantity. For each
+output dimension the diagnostic reports
+
+$$s_{\rm residual}=\sqrt{SSE/T},\qquad
+s_{\rm corrected}=\sqrt{(SSE+U)/T},\qquad
+U=\sum_tJ_t\Sigma J_t^\top.$$
+
+`inflation_factor` compares these two residual scales. `reported_sd` separately
+records the fitted noise summary. A large factor indicates prediction uncertainty
+contributes substantially; a factor near 1 does not validate the prior, model,
+posterior approximation or reported noise. There is no universal 1.1 cutoff.
+This is a first-order prediction approximation, not an exact nonlinear expected
+residual; prediction curvature can contribute additional terms.
+
+**It is not generally unbiased.** In full-rank Gaussian linear regression with
+$p$ mean coefficients and effectively flat priors, inserting the ML covariance
+$\Sigma=\hat\sigma^2(X^\top X)^{-1}$ gives $U=p\hat\sigma^2$, and one step yields
+
+$$s_{\rm corrected}^2=\frac{SSE}{T}(1+p/T),\qquad
+E[s_{\rm corrected}^2]=\sigma^2[1-(p/T)^2].$$
+
+Solving the different self-consistency equation
+$s^2=(SSE+ps^2)/T$ gives $SSE/(T-p)$, the unbiased **variance** estimator under
+those assumptions. GBM does not perform that iteration. Taking the square root
+also introduces bias: with $\nu=T-p$,
+
+$$E[\sqrt{SSE/T}]=\sigma\sqrt{2/T}\,
+\frac{\Gamma((\nu+1)/2)}{\Gamma(\nu/2)},$$
+
+not exactly $\sigma\sqrt{(T-p)/T}$. Proper priors, nonlinear models, and joint
+noise estimation alter these linear-reference results. In particular, the
+Gamma-prior MAP noise is not generally the ML residual variance.
+
+The diagnostic changes neither the fitted posterior nor model evidence. It is
+available for deterministic Gaussian models with free parameters and valid
+Laplace covariance; it can also be computed with fixed observation covariance.
+It summarizes each output's residual scale, not a full covariance correction or
+a trial-specific heteroscedastic noise estimate. For stochastic states it returns
+`valid=False`, because predicted-state residuals also contain state uncertainty.
+
+## 9. Compare models, families, conditions and groups
+
+All candidates must describe the same observed data and observation measure.
+Do not compare a continuous density with a mass for differently encoded data.
+Use defensible normalized priors and inspect every subject's fit first.
+
+### Basic random-effects BMS
+
+Let $L_{sk}$ be subject $s$'s log evidence for model $k$. The population model is
+
+$$r\sim\operatorname{Dirichlet}(\alpha_0),\quad
+z_s\mid r\sim\operatorname{Categorical}(r),\quad
+p(y_s\mid z_s=k)=e^{L_{sk}}.$$
+
+Mean-field inference alternates responsibilities and counts:
+
+$$\gamma_{sk}\propto\exp[L_{sk}+\psi(\alpha_k)-\psi(\sum_j\alpha_j)],\qquad
+\alpha_k=\alpha_{0k}+\sum_s\gamma_{sk}.$$
+
+Normalize responsibilities over models. Exactly constant evidence rows are
+marginalized before count updates: they contribute an evidence offset but no
+frequency information. Weak nonconstant rows can still suffer mean-field bias.
+
+| Output | Interpretation |
+|---|---|
+| `model_frequency` | Posterior expected population frequency |
+| `responsibilities` | Subject-specific model assignments, probabilistically |
+| `exceedance_prob` (EP) | Probability a frequency exceeds every other frequency |
+| `bor` | Posterior probability of a fixed equal-frequency null under equal hypothesis prior odds |
+| `protected_exceedance_prob` (PXP) | $(1-\mathrm{BOR})\mathrm{EP}+\mathrm{BOR}/K$ |
+
+The alternative's `log_evidence` is a variational lower bound for model-only
+BMS. The null is $F_0=\sum_s\log[(1/K)\sum_ke^{L_{sk}}]$ and
+$\mathrm{BOR}=\operatorname{sigmoid}(F_0-F_1)$. Approximation errors in bounds
+need not cancel in hypothesis odds. EP is not the probability that a model is
+universally true or that every subject uses it.
+
+### Current defaults and family choices
+
+| Setting | Default in this version |
+|---|---|
+| Model prior without families | $\alpha_{0k}=1/K$ (one total count) |
+| With $F$ families of sizes $K_f$ | $\alpha_{0k}=1/(FK_f)$ for $k\in f$ |
+| `family_method` | `"aggregate"` |
+| `group_level` | `"models"`, even when families are supplied |
+
+Explicit `alpha0` overrides prior counts. Use `np.ones(K)` for one count per
+model. Families must be nonempty, disjoint, zero-based and cover all columns.
+
+**Aggregate:** sum the model-level variational Dirichlet counts and assignments
+within families. This is exact aggregation of an approximate posterior. It
+retains a population distribution over the individual models. Weak evidence,
+unequal family sizes and small prior counts can produce large mean-field bias.
+
+**Marginal:** integrate a uniformly chosen within-family model separately for
+each subject, then infer family frequencies:
+
+$$L_{sf}=\operatorname{logsumexp}_{k\in f}L_{sk}-\log K_f,\qquad
+\alpha_{0f}=\sum_{k\in f}\alpha_{0k}.$$
+
+This does not estimate population frequencies within each family. Select it
+explicitly when that is the intended model:
 
 ```python
 from gbmtoolbox import bms
-
-conditions = bms(L_conditions, families=[[0, 1], [2, 3]])  # subjects x models x conditions
-print(conditions.pxp)
-groups = bms([L_patients, L_controls], families=[[0, 1], [2, 3]])  # one matrix per group
-print(groups.probability_equal)
+result = bms(L, families=[[0, 1], [2, 3]], family_method="marginal")
 ```
 
-Differences from VBA's `VBA_groupBMC`, `VBA_groupBMC_btwConds` and
-`VBA_groupBMC_btwGroups`:
+For two marginal families, numerical quadrature integrates
 
-- Families default to uniform within-family evidence marginalization. Two-family
-  reports integrate the frequency posterior; use `family_method="aggregate"`
-  to recover the previous variational Dirichlet aggregation.
-- The family-BOR constant adjustment is removed. The explicit fixed family
-  null is used instead. VBA's source computes its family null with an entropy
-  expression based on unweighted model attributions; GBM evaluates the stated
-  fixed-profile mixture exactly. Unequal-family results need not match that
-  source line for line.
-- Condition BOR is the equal/not_equal family BOR, rather than the model-tuple
-  BOR.
-- Group tuples are replaced by the pooled/separate frequency test. Group
-  results report `probability_equal`/`probability_different`, not `xp`/`pxp`.
-  Native family-level group comparison is explicitly different from VBA's
-  full model-frequency test with family-balanced priors; select
-  `group_level="models"` for the latter.
-- Invalid/overlapping/incomplete families, non-finite evidence, inconsistent
-  group columns, invalid control values, and excessive tuple counts raise clear
-  errors. A single candidate is handled as a degenerate distribution.
+$$p(r\mid y)\propto r^{a-1}(1-r)^{b-1}
+\prod_s[re^{L_{s0}}+(1-r)e^{L_{s1}}].$$
 
-Binary EP values use analytic probabilities and therefore may differ slightly
-from Monte Carlo estimates even on identical data. These features operate on supplied evidence and do not change model fitting,
-noise estimation, parameter-scaling defaults, or HBI parameter updates.
+It returns integrated means, variances, assignments, evidence and EP, up to
+numerical error. This posterior is generally not Beta, so
+`posterior_parameters=None`; `expected_counts` are not exact Dirichlet parameters.
+More than two marginal families and all model-only BMS reports use mean-field
+inference. Duplicating every model within a family leaves its marginal evidence
+unchanged; aggregation need not have this invariance.
 
-Method references:
-[VBA group BMS documentation](https://mbb-team.github.io/VBA-toolbox/wiki/BMS-for-group-studies/),
-[family BMS source](https://github.com/MBB-team/VBA-toolbox/blob/master/VBA_groupBMC.m),
-[paired-condition source](https://github.com/MBB-team/VBA-toolbox/blob/master/VBA_groupBMC_btwConds.m),
-and [between-group source](https://github.com/MBB-team/VBA-toolbox/blob/master/VBA_groupBMC_btwGroups.m).
-The extension implements their statistical constructions with the differences
-specified above; it is not claimed to be a bit-for-bit MATLAB port.
+The family null uses probability $1/(FK_f)$ for each model in family $f$.
+Family BOR compares it with the full-model bound for aggregate inference, or
+the family evidence/bound for marginal inference. Family PXP uses this family
+BOR. `families.within[f]` is a separate analysis restricted to that family,
+with a uniform prior totaling one; it is not the full posterior renormalized.
+A singleton has frequency and EP/PXP one; its vacuous BOR is one.
 
-`hbi_main` implements hierarchical empirical-Bayes refitting: group-level priors
-and individual fits are estimated together, so each subject is regularised
-toward the group while the group is estimated from the subjects. It updates
-model-specific Gaussian group priors by responsibility-weighted posterior moment
-matching, using the MAP and independently recomputed observed Hessian for each
-refit.
+### Paired and factorial conditions
 
-Each sweep checks maximum absolute changes in model frequencies, group-prior
-means, and group-prior covariance entries against `HBIConfig.tol`.
-`convergence_history` records all three. Empty scientific parameter blocks are
-supported. On convergence or exhaustion of `maxiter`, `group_priors` are the
-priors actually used for the returned subject fits. The final proposed update
-is not applied without a subsequent subject refit. A nonconverged result
-remains labeled `converged=False`. This is a numerical consistency fix, not a
-full variational HBI algorithm. Every subject must have a converged optimizer
-run and positive-definite observed Hessian; otherwise HBI raises an error.
+`bms_conditions(L)` accepts `(subjects, models, conditions)`; subject identities
+and row order must match. A model tuple $(m_1,\ldots,m_C)$ has evidence
+$L_{s,t}=\sum_cL_{s,m_c,c}$. This assumes separately integrated condition-specific
+parameters with independent priors and appropriate conditional independence.
+Shared parameters require joint evidence; overlapping observations must not be
+counted twice.
 
-### Differences from the original HBI
+Tuples are `equal` if all models are identical, or all belong to the same supplied
+family. The equal/not-equal tuple families receive equal prior mass, total count
+one; `alpha0` controls only the per-condition analyses. `family_method` also
+controls tuple-family inference; use `"marginal"` explicitly for integration.
+`xp` and `pxp` concern the prevalence of equal versus unequal tuples, not a
+probability that all subjects share one model. `best` uses the model-tuple
+variational frequencies even when tuple-family reports use marginal integration.
 
-This is an HBI-*inspired* implementation, not a reproduction of the variational
-equations in Piray et al. (2019) or of the reference `cbm` code. The iteration
-structure is the same — alternate between per-subject MAP/Laplace fits under the
-current group prior, responsibility assignment, and a group-prior update — but
-the following differ deliberately:
+`factors=np.array([[0,1],[2,3]])` defines a complete factorial condition layout.
+Each non-singleton axis tests equality along that axis at all combinations of
+other levels; `factor_axes` records the axes. Enumeration requires $K^C$ tuples:
+`max_tuples=100000` limits allocation, with a warning above 10,000. One condition
+returns ordinary BMS; one family makes equality vacuous.
 
-- **Empirical Bayes rather than full variational Bayes.** The original places a
-  Normal-Gamma hyperprior on the group mean and precision and updates its
-  variational parameters (`a`, `beta`, `nu`, `sigma`). Here the group prior is
-  re-estimated directly by moment matching from the weighted subject posteriors,
-  with no hyperprior and no shrinkage toward a prior group mean. Consequently
-  there is no `group_hierarchical_errorbar`: uncertainty on the group mean is
-  not propagated.
-- **Full covariance instead of diagonal.** The original tracks only the diagonal
-  of the inverse Hessian and assumes a diagonal group precision. Here the group
-  covariance is a full matrix, built from each subject's complete Laplace block
-  plus the between-subject spread, then symmetrised and eigenvalue-floored to
-  stay positive definite.
-- **Responsibilities from Laplace evidence.** Responsibilities combine the full
-  Laplace log evidence with `psi(alpha) - psi(sum(alpha))`. The original instead
-  uses `logf - 0.5*log|A|` corrected by expected-precision terms arising from the
-  variational bound.
-- **No free-energy bound.** The original monitors the variational lower bound and
-  reports exceedance and protected exceedance probabilities. Convergence here is
-  assessed on changes in model frequency, group means, and group covariance, and no bound is
-  computed; use `bms` for exceedance probabilities.
-- **Scope.** Group refitting applies to evolution (`theta`) and observation
-  (`phi`) parameters only. Process- and observation-noise priors stay at their
-  model-level specification, though noise parameters are still fitted per subject
-  and enter each subject's Hessian and evidence. Fixed parameters are restored
-  exactly after each update.
+### Independent groups
 
+`bms_groups([L_a, L_b])` allows unequal group sizes, with matching model columns.
+It compares one shared population-frequency profile ($H_=$) against separate
+profiles ($H_{\ne}$):
 
-## Reading the result
+$$F_=F(\operatorname{stack}_g L_g),\quad F_{\ne}=\sum_gF(L_g),\quad
+\log BF_{\ne,=}=F_{\ne}-F_=,$$
+$$P(H_=\mid y)=\operatorname{sigmoid}[F_=-F_{\ne}+\log(\pi_=/(1-\pi_=))].$$
+
+`prior_equal=0.5` sets $\pi_=$; each profile has the same specified Dirichlet
+prior. Two comparison categories use integrated frequency evidence; larger
+spaces use variational bounds. `evidence_method` identifies the calculation.
+`comparison_pooled` and `comparison_per_group` remain variational BMS summaries
+even when the top-level group odds use binary quadrature.
+
+The default compares **model frequencies**. For family frequencies, use
 
 ```python
-fit.output.parameters  # MAP estimates, subjects x parameters
-fit.output.log_evidence  # Laplace log evidence per subject
-fit.output.latent  # state trajectories and uncertainty
-fit.math.covariance  # posterior covariance, or None if Laplace invalid
-fit.math.hessian  # observed Hessian at the MAP
-fit.math.diagnostics  # per-subject convergence and Laplace status
+from gbmtoolbox import bms_groups
+out = bms_groups([L_a, L_b], families=[[0, 1], [2, 3]], group_level="families")
+print(out.probability_equal, out.probability_different)
 ```
 
-Check `fit.math.diagnostics` before interpreting `covariance`: it is `None`
-exactly when the Laplace approximation is invalid, and that is a result worth
-knowing rather than an inconvenience.
+This uniformly marginalizes within-family models and uses summed family prior
+counts. `group_level="auto"` selects families when supplied, otherwise models.
+These hypothesis probabilities are not EPs. Groups can have different model
+frequencies but identical family frequencies. `family_method` controls attached
+family reports, whereas `group_level` controls the group hypothesis itself.
 
-## Tutorials
+`bms` dispatches a 2D array to ordinary BMS, a 3D array to paired conditions,
+and a list of 2D matrices to independent groups. Dirichlet EPs use Beta tails
+for two candidates and seeded, memory-bounded Monte Carlo otherwise. At the
+default 100,000 draws, each sampled EP has Monte Carlo SE at most 0.0016.
+The VBA-inspired constructions differ in family nulls, optional marginal
+families and condition protection; they are not a line-by-line MATLAB port.
 
-Runnable, commented examples in `gbmtoolbox/examples/`:
+## 10. Refit subjects hierarchically
 
-1. `01_individual_fit.py` — learning model with propagated uncertainty
-2. `02_continuous_fit.py` — Gaussian outcomes and observation covariance
-3. `03_bms.py` — random-effects model selection
-4. `04_hbi.py` — hierarchical empirical-Bayes refitting
-5. `05_fixed_parameters.py` — fixing parameters via zero prior variance
-6. `06_diagnostics.py` — convergence, Hessian, information, identifiability
-7. `07_predictive_checks.py` — prior and posterior predictive checks
-8. `08_filtered_state_model.py` — latent uncertainty from filtering
-9. `09_observation_only.py` — models with no latent dynamics, all three families
-10. `10_observation_noise_correction.py` — is the reported observation noise trustworthy?
-11. `11_family_condition_group_bms.py` — family, paired-condition and between-group model selection
+`hierarchical_fit` alternates subject fitting and learned Gaussian group priors.
+It is **empirical-Bayes/Laplace refitting**, inspired by CBM/HBI, not the original
+variational HBI algorithm. Use the current public names:
 
-## References
+```python
+from gbmtoolbox import Config, HierarchicalFitConfig, hierarchical_fit
+result = hierarchical_fit(
+    data, [model_a, model_b],
+    fit_config=Config(random_state=42, verbose=False),
+    hbi_config=HierarchicalFitConfig(maxiter=30, tol=1e-3, verbose=False),
+)
+```
 
-The methodological lineage is the Computational Behavioral Modeling framework
-and the HBI method:
+The keyword `hbi_config` is retained by the current API; it does not indicate
+full HBI inference. Old imports `hbi_main` and `HBIConfig` are not exported.
 
-> Piray P, Dezfouli A, Heskes T, Frank MJ, Daw ND (2019). Hierarchical Bayesian
-> inference for concurrent model fitting and comparison for group studies.
-> *PLOS Computational Biology* 15(6): e1007043.
-> [doi:10.1371/journal.pcbi.1007043](https://doi.org/10.1371/journal.pcbi.1007043)
+For subject posterior block means $m_{sk}$, covariances $S_{sk}$ and
+responsibilities $\gamma_{sk}$, write $N_k=\sum_s\gamma_{sk}$. The proposed group
+update is
 
-Random-effects Bayesian model selection:
+$$\mu_k=\frac1{N_k}\sum_s\gamma_{sk}m_{sk},\qquad
+\Sigma_k=\frac1{N_k}\sum_s\gamma_{sk}
+[S_{sk}+(m_{sk}-\mu_k)(m_{sk}-\mu_k)^\top].$$
 
-> Stephan KE, Penny WD, Daunizeau J, Moran RJ, Friston KJ (2009). Bayesian model
-> selection for group studies. *NeuroImage* 46(4): 1004–1017.
+Responsibilities use current subject Laplace evidence and expected log model
+frequencies, followed by $\alpha_k=1+\sum_s\gamma_{sk}$. This hierarchical
+routine uses one count **per model**, independently of the standalone BMS default.
+One responsibility update occurs per outer sweep.
 
-Background on the Laplace approximation, state-space models and filtering:
+Group updates are separate for evolution and observation blocks. Covariances
+are full within each block, not across blocks; noise priors remain fixed.
+Fixed scientific coordinates remain fixed. Near-zero model weight retains the
+original block prior. Free group covariance eigenvalues are floored at
+$\max(10^{-8},10^{-8}\lambda_{\max})$; this regularization is distinct from the
+unrepaired subject posterior Hessian.
 
-> Bishop CM (2006). *Pattern Recognition and Machine Learning*, ch. 4.4 and 13.
-> Särkkä S (2013). *Bayesian Filtering and Smoothing*. Cambridge.
+Stopping checks maximum absolute changes in group means, covariance entries
+and model frequencies. One tolerance is applied in these different units, so
+parameter scaling matters. Returned `group_priors` are those used for returned
+subject fits; the last proposed update is not applied without a refit.
+Inspect `converged` and `convergence_history`; reaching `maxiter` is not convergence.
 
-For how each numerical claim here is checked, see [VALIDATION.md](VALIDATION.md).
+There is no group hyperprior, integrated uncertainty over group means/precisions,
+or monitored hierarchical free-energy bound. Learned-prior subject evidences
+are conditional empirical-Bayes quantities, not fully integrated hierarchical
+model evidence. Passing them to `bms` gives a conditional comparison and does
+not recover the original HBI method. Group-frequency responsibilities also
+inherit the approximate subject fits and the responsibility-update assumptions.
 
+## 11. Control speed and reproducibility
 
+Deterministic observation-only models use vectorized likelihoods; evolving
+states use sequential scans. Scalar/diagonal Gaussian covariances use elementwise
+formulas. Objective and evaluator compilation can be reused across prior changes.
+Callables and captured settings must remain immutable; new shapes, dtypes,
+input structures or callables can require compilation.
 
+`Config(parameter_scaling=True)` changes search coordinates to $w=\mu+Bz$.
+Without bounds, $B$ is a prior-covariance Cholesky factor; with bounds it uses
+marginal SDs to preserve box constraints. The log-joint objective remains in
+original coordinates, without an added coordinate Jacobian. Returned curvature
+uses $H_w=B^{-T}H_zB^{-1}$ and evidence remains in the original coordinates.
+Scaling is off by default and can change convergence paths/local optima.
 
-## Reproducibility and variable runtime
+`Config(n_jobs=4)` fits subjects in separate processes; `-1` uses available CPUs.
+Worker startup and compilation can outweigh gains for short fits. Do not assume
+a benchmark speedup transfers to a different model or hardware.
 
-`Config.random_state` controls optimization starts and propagated latent draws.
-Each subject now has separate optimization and uncertainty streams, so changing
-`latent_samples` or requesting propagated reporting cannot change later subjects'
-starts. Appending subjects preserves earlier streams; reordering subjects
-changes which stream is assigned to which subject. The same seed produces a
-new sequence compared with older GBM releases. Nonlinear fits can consequently
-select a different mode. Recorded `starts` permit direct comparison.
+`Config(random_state=42)` seeds individual optimization and parameter propagation
+through separate streams by subject index. Reordering subjects changes their
+assigned streams. Hierarchical fitting inherits that seed unless an explicit
+`HierarchicalFitConfig` is supplied; each model retains its seed across sweeps.
+BMS and predictive functions have separate `random_state` arguments.
+`None` requests unseeded draws. Seeded results need not be bitwise identical
+across JAX versions or hardware.
 
-When `hbi_config` is omitted, HBI inherits `fit_config.random_state`. An explicit
-`HBIConfig.random_state` takes precedence. Model-specific seeds are stored in
-`HBIResult.model_seeds` and reused across sweeps. `None` deliberately requests
-unseeded draws. BMS EP sampling uses `bms(..., random_state=...)`; prior/posterior
-predictive helpers use their own `random_state` arguments. These do not inherit
-an unrelated fit configuration. Two-family quadrature/group odds have no RNG.
-Data generation and random operations inside user functions remain the user's
-responsibility: evolution/observation functions must be deterministic for fixed
-arguments during fitting.
-
-A seed does not fix runtime. The first JAX call may compile; later calls can
-reuse in-memory or persistent compiled executables. Unless a JAX compilation
-cache directory is already configured (`jax.config` or
-`JAX_COMPILATION_CACHE_DIR`), importing the toolbox sets one at
+A seed does not fix runtime: compilation, caches, process startup and load vary.
+Unless already configured, a persistent JAX cache is set at
 `~/.cache/gbmtoolbox/jax`; disable it with
-`jax.config.update("jax_enable_compilation_cache", False)`. Model functions, shapes, dtypes,
-filter settings, process/device initialization, hardware load, and numerical
-thread scheduling also affect timing. Separate cold-process timing from repeated
-warm fits. Use `fit.math.diagnostics[s].timings`, `n_evaluations`, and start
-records to distinguish setup time from different optimizer work. Host result
-conversion synchronizes GBM's recorded inference stages; hand-written JAX timers
-should call `block_until_ready()` before stopping. Numerical results across
-JAX versions or different hardware are not promised to be bitwise identical.
-See [JAX benchmarking](https://docs.jax.dev/en/latest/benchmarking.html) and
-[asynchronous dispatch](https://docs.jax.dev/en/latest/async_dispatch.html).
+`jax.config.update("jax_enable_compilation_cache", False)`.
+Inspect `fit.profile.timings` and `fit.math.diagnostics[s].timings`,
+`n_evaluations` and start records. Separate cold and warm fits; nested timing
+stages must not be added together. Custom JAX timers must synchronize results.
+
+## 12. Report an analysis and find references
+
+Report the toolbox commit and dependencies; model equations and outcome coding;
+priors and fitted coordinates; fixed parameters, noise structure and units;
+optimizer/filter settings and diagnostics; uncertainty approximation; and BMS
+prior counts, family method and group comparison level. For hierarchical fitting,
+report convergence and identify the empirical-Bayes approximation explicitly.
+
+The [validation guide](VALIDATION.md) distinguishes exact reference calculations,
+approximation checks and empirical recovery examples. Passing selected checks
+does not establish accuracy for an arbitrary nonlinear model.
+
+- Piray et al. (2019), [Hierarchical Bayesian inference for concurrent model
+  fitting and comparison for group studies](https://doi.org/10.1371/journal.pcbi.1007043).
+  Methodological lineage; GBM's empirical-Bayes refitting differs as described above.
+- [VBA group-comparison documentation](https://mbb-team.github.io/VBA-toolbox/wiki/BMS-for-group-studies/)
+  and [source](https://github.com/MBB-team/VBA-toolbox): reference statistical constructions,
+  with the GBM differences stated in section 9.
+- [JAX benchmarking](https://docs.jax.dev/en/latest/benchmarking.html): compilation and timing.

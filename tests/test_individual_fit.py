@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from gbmtoolbox import Config, GaussianPrior, HBIConfig, Priors, StateModel, bms, hbi_main, individual_fit
+from gbmtoolbox import Config, GaussianPrior, HierarchicalFitConfig, Priors, StateModel, bms, hierarchical_fit, individual_fit
 
 
 def test_binary_individual_fit_and_propagated_uncertainty(binary_model, binary_data):
@@ -60,11 +60,11 @@ def test_unconverged_map_does_not_return_evidence_or_posterior_covariance():
     with pytest.raises(ValueError, match="finite"):
         bms(np.column_stack([out.output.log_evidence, np.zeros(1)]))
     with pytest.raises(RuntimeError, match="valid Laplace"):
-        hbi_main(
+        hierarchical_fit(
             [{"y": np.ones(10) * 10, "u": None}],
             [model],
             fit_config=Config(num_init=1, maxiter=1, verbose=False),
-            hbi_config=HBIConfig(maxiter=1, verbose=False),
+            hbi_config=HierarchicalFitConfig(maxiter=1, verbose=False),
         )
 
 
